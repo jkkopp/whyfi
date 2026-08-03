@@ -227,6 +227,20 @@ class MissionController(
     companion object {
         const val DEFAULT_NEAR_RADIUS_M = 250.0
 
+        /** "Show all readings" mode (see MissionScreen.kt) — passed as
+         * radiusMeters to effectively disable the near-location filter
+         * without needing a separate unfiltered backend endpoint: the
+         * backend's haversine check just never excludes anything at this
+         * radius. Useful when the near filter is dropping readings you
+         * still want to see — BLE especially, where a favorited device may
+         * genuinely have been seen far from where you're standing now (it
+         * moved, or you're looking it up somewhere new), not just "noise"
+         * the filter is right to exclude. Comfortably larger than any real
+         * great-circle distance on Earth (~20,000km, half the
+         * circumference) rather than Double.MAX_VALUE, so it stays a
+         * meaningful number if ever logged/displayed. */
+        const val SHOW_ALL_RADIUS_M = 20_000_000.0
+
         /** Fallback shape radius when a cone can't be drawn (apex too close
          * to the reading, or only one reading exists so far) — see
          * MissionScreen.kt. Deliberately not the PWA's per-radio-type

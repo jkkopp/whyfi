@@ -89,13 +89,31 @@ fun MissionScreen(
         }
     }
 
-    fun selectOrRetarget(target: MissionTarget) {
+    // Off by default — the 250m near-filter is what keeps a favorited
+    // target's sightings from some other place entirely (a travel router, a
+    // BLE device that moved) from corrupting the estimate. But that same
+    // filter can legitimately hide readings you still want: a favorited BLE
+    // device really was seen far from where you're standing now. This toggle
+    // swaps DEFAULT_NEAR_RADIUS_M for SHOW_ALL_RADIUS_M, effectively
+    // disabling the filter without a separate backend endpoint (see that
+    // constant's KDoc). Re-runs the current target on change.
+    var showAllReadings by remember { mutableStateOf(false) }
+    val nearRadius = if (showAllReadings) MissionController.SHOW_ALL_RADIUS_M else MissionController.DEFAULT_NEAR_RADIUS_M
+
+    // Shared by the favorite chips and the show-all toggle: re-run [target]
+    // at [radius], keeping tracking-vs-one-shot state as it is. Passing the
+    // radius explicitly (rather than relying on selectOrRetarget's captured
+    // value) lets the toggle apply the *new* radius on the same interaction
+    // that flips it, before a recomposition has updated [nearRadius].
+    fun runTarget(target: MissionTarget, radius: Double) {
         if (uiState.isTracking) {
-            missionController.start(target, service)
+            missionController.start(target, service, radius)
         } else {
-            scope.launch { missionController.selectTarget(target) }
+            scope.launch { missionController.selectTarget(target, radius) }
         }
     }
+
+    fun selectOrRetarget(target: MissionTarget) = runTarget(target, nearRadius)
 
     // A Box, not a Column with the map sandwiched between two bars —
     // trying to *constrain* the map to a middle slice (weight(1f) +
@@ -122,8 +140,11 @@ fun MissionScreen(
                         "Locating…"
                     } else if (uiState.error != null) {
                         ""
+                    } else if (showAllReadings) {
+                        "No readings of \"${uiState.target?.identifier}\" found at all yet."
                     } else {
-                        "No readings of \"${uiState.target?.identifier}\" found near your current location."
+                        "No readings of \"${uiState.target?.identifier}\" found near your current location. " +
+                            "Turn on \"Show all readings\" to include ones recorded elsewhere."
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(horizontal = 32.dp),
@@ -166,7 +187,7 @@ fun MissionScreen(
                         enabled = uiState.target != null,
                         onCheckedChange = { tracking ->
                             val target = uiState.target ?: return@Switch
-                            if (tracking) missionController.start(target, service) else missionController.stop()
+                            if (tracking) missionController.start(target, service, nearRadius) else missionController.stop()
                         },
                     )
                     Text(
@@ -185,6 +206,36 @@ fun MissionScreen(
                                 label = { Text("${target.kind.icon} ${target.identifier}") },
                             )
                         }
+                    }
+                }
+
+                // Available as soon as a target is picked, not gated on
+                // points existing — an empty result is often *why* you'd
+                // reach for it (the near-filter excluded everything), so it
+                // has to be reachable in exactly that state.
+                if (uiState.target != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    ) {
+                        Switch(
+                            checked = showAllReadings,
+                            onCheckedChange = { showAll ->
+                                showAllReadings = showAll
+                                val target = uiState.target ?: return@Switch
+                                val radius = if (showAll) {
+                                    MissionController.SHOW_ALL_RADIUS_M
+                                } else {
+                                    MissionController.DEFAULT_NEAR_RADIUS_M
+                                }
+                                runTarget(target, radius)
+                            },
+                        )
+                        Text(
+                            "Show all readings (ignore distance)",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(start = 4.dp),
+                        )
                     }
                 }
 
@@ -219,7 +270,7 @@ fun MissionScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    statusBarText(uiState),
+                    statusBarText(uiState, showAllReadings),
                     style = MaterialTheme.typography.bodySmall,
                     color = if (uiState.error != null) {
                         MaterialTheme.colorScheme.error
@@ -232,19 +283,25 @@ fun MissionScreen(
     }
 }
 
-private fun statusBarText(uiState: MissionUiState): String = when {
-    uiState.isLoading -> "Locating…"
-    uiState.error != null -> uiState.error
-    uiState.truncated && uiState.isTracking -> {
-        "Showing ${uiState.points.size} readings (more exist) — tracking, outlined cone is your position."
+private fun statusBarText(uiState: MissionUiState, showAllReadings: Boolean): String {
+    // "near your current location" is only true when the near-filter is on;
+    // in show-all mode the readings can be from anywhere the target was ever
+    // seen, so drop that qualifier rather than state something false.
+    val where = if (showAllReadings) "everywhere it's been seen" else "near your current location"
+    return when {
+        uiState.isLoading -> "Locating…"
+        uiState.error != null -> uiState.error
+        uiState.truncated && uiState.isTracking -> {
+            "Showing ${uiState.points.size} readings (more exist) — tracking, outlined cone is your position."
+        }
+        uiState.truncated -> "Showing ${uiState.points.size} readings — more exist."
+        uiState.isTracking && uiState.livePosition != null -> "Tracking — the outlined cone is your current position."
+        uiState.isTracking -> "Tracking — waiting for a GPS/network fix…"
+        uiState.points.isNotEmpty() -> {
+            "${uiState.points.size} reading${if (uiState.points.size == 1) "" else "s"} $where."
+        }
+        else -> ""
     }
-    uiState.truncated -> "Showing ${uiState.points.size} readings — more exist near here."
-    uiState.isTracking && uiState.livePosition != null -> "Tracking — the outlined cone is your current position."
-    uiState.isTracking -> "Tracking — waiting for a GPS/network fix…"
-    uiState.points.isNotEmpty() -> {
-        "${uiState.points.size} reading${if (uiState.points.size == 1) "" else "s"} near your current location."
-    }
-    else -> ""
 }
 
 @Composable
