@@ -48,10 +48,19 @@ data class DataTableRow(
      * which renders no star at all. */
     val isFavorite: Boolean = false,
     val onFavoriteToggle: (() -> Unit)? = null,
+    /** Set (with [onRange]) only for WiFi rows that are both favorited and
+     * 802.11mc-responder-capable — see ui/ScanDetailScreen.kt. Null on every
+     * other row, which renders no range control at all. */
+    val onRange: (() -> Unit)? = null,
+    /** null = idle (show the 📡 prompt), "…" = ranging in flight, anything
+     * else = the last result, shown in place of the prompt until the row is
+     * ranged again. */
+    val rangeStatus: String? = null,
 )
 
 private val BADGE_COLUMN_WIDTH = 62.dp
 private val FAVORITE_COLUMN_WIDTH = 36.dp
+private val RANGE_COLUMN_WIDTH = 56.dp
 
 /** First number found anywhere in a cell — "Ch 6 (2.4GHz)" -> 6, "-72 dBm"
  * -> -72. Falls back to plain string comparison when either side has no
@@ -98,6 +107,8 @@ fun DataTable(
     // decides if the column exists at all, same reasoning as showBadgeColumn.
     val showFavoriteColumn = rows.any { it.onFavoriteToggle != null }
     val favoriteWidth = if (showFavoriteColumn) FAVORITE_COLUMN_WIDTH else 0.dp
+    val showRangeColumn = rows.any { it.onRange != null }
+    val rangeWidth = if (showRangeColumn) RANGE_COLUMN_WIDTH else 0.dp
 
     // rememberSaveable, not remember: rotating the phone shouldn't silently
     // clear a search you were mid-typing.
@@ -134,6 +145,7 @@ fun DataTable(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (showFavoriteColumn) Box(Modifier.width(favoriteWidth))
+            if (showRangeColumn) Box(Modifier.width(rangeWidth))
             if (showBadgeColumn) Box(Modifier.width(leadingWidth))
             Row(Modifier.horizontalScroll(scrollState)) {
                 columns.forEachIndexed { index, column ->
@@ -184,6 +196,11 @@ fun DataTable(
                             row.onFavoriteToggle?.let { toggle -> FavoriteStar(row.isFavorite, toggle) }
                         }
                     }
+                    if (showRangeColumn) {
+                        Box(Modifier.width(rangeWidth), contentAlignment = Alignment.Center) {
+                            row.onRange?.let { onRange -> RangeButton(row.rangeStatus, onRange) }
+                        }
+                    }
                     if (showBadgeColumn) {
                         Box(Modifier.width(leadingWidth).padding(start = 4.dp)) {
                             row.badge?.let { Badge(it) }
@@ -223,6 +240,24 @@ private fun FavoriteStar(isFavorite: Boolean, onToggle: () -> Unit) {
         modifier = Modifier.clickable(onClick = onToggle).padding(4.dp),
         fontSize = 18.sp,
         color = if (isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/** 📡 prompt for a one-off Wi-Fi RTT/FTM ranging measurement — see
+ * ui/ScanDetailScreen.kt. Disabled (no click) while [status] is "…", so a
+ * slow ranging call can't be re-triggered mid-flight. */
+@Composable
+private fun RangeButton(status: String?, onRange: () -> Unit) {
+    val inFlight = status == "…"
+    Text(
+        status ?: "📡",
+        modifier = Modifier
+            .clickable(enabled = !inFlight, onClick = onRange)
+            .padding(4.dp),
+        fontSize = if (status == null) 18.sp else 11.sp,
+        color = if (inFlight) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
     )
 }
 

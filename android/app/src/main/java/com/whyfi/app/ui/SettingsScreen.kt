@@ -15,6 +15,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -87,14 +88,14 @@ fun SettingsScreen(
     ) {
         Text("Settings", style = MaterialTheme.typography.headlineSmall)
 
-        Text("Appearance", style = MaterialTheme.typography.titleMedium)
+        SettingsSectionHeader("Appearance")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ThemeOption("System", ThemePreference.SYSTEM, themePreference, onThemePreferenceChange)
             ThemeOption("Light", ThemePreference.LIGHT, themePreference, onThemePreferenceChange)
             ThemeOption("Dark", ThemePreference.DARK, themePreference, onThemePreferenceChange)
         }
 
-        Text("Location source", style = MaterialTheme.typography.titleMedium)
+        SettingsSectionHeader("Location source")
         Text(
             "GPS is the original behavior (best of GPS/network) and stays the default. Fused uses Android's " +
                 "combined location (API 31+); Both records the GPS/network reading as usual plus a separate fused " +
@@ -172,7 +173,7 @@ fun SettingsScreen(
 
         savedMessage?.let { Text(it) }
 
-        Text("Remote control", style = MaterialTheme.typography.titleMedium)
+        SettingsSectionHeader("Remote control")
         Text(
             "Lets whyfi in your browser start and stop scanning on this phone, and set how often it scans. " +
                 "The phone checks in with the backend every few seconds and does what it's told — Android " +
@@ -211,7 +212,7 @@ fun SettingsScreen(
             }
         }
 
-        Text("Scan cadence", style = MaterialTheme.typography.titleMedium)
+        SettingsSectionHeader("Scan cadence")
         Text(
             "A phone sitting on a desk keeps re-scanning the same airwaves; a phone in a car covers new " +
                 "ground every second. With this on, the scanner picks its interval from how the phone is " +
@@ -271,7 +272,7 @@ fun SettingsScreen(
             }
         }
 
-        Text("Offline storage", style = MaterialTheme.typography.titleMedium)
+        SettingsSectionHeader("Offline storage")
         Text(
             "Scans are queued on the phone whenever the backend is unreachable, then uploaded automatically. " +
                 "This caps how much space that queue may use — once it's full, the oldest queued scans are " +
@@ -304,7 +305,7 @@ fun SettingsScreen(
             Text("Save storage limit")
         }
 
-        Text("Diagnostics", style = MaterialTheme.typography.titleMedium)
+        SettingsSectionHeader("Diagnostics")
         Text(
             "If whyfi crashes, the exception is written to this app's private storage before Android's normal " +
                 "crash handling takes over, so it can be read and sent from here afterward — no computer, adb, or " +
@@ -405,6 +406,22 @@ private fun ThemeOption(
     onSelect: (ThemePreference) -> Unit,
 ) {
     FilterChip(selected = current == value, onClick = { onSelect(value) }, label = { Text(label) })
+}
+
+/** One settings section's heading. The screen is long and scrolls; without a
+ * rule and colour separating them the headings read as just more body text
+ * and the sections run together. */
+@Composable
+private fun SettingsSectionHeader(title: String) {
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        HorizontalDivider()
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
+        )
+    }
 }
 
 @Composable

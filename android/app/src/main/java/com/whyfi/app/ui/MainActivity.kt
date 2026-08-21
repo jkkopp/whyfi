@@ -4,17 +4,22 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -26,6 +31,7 @@ import com.whyfi.app.mission.MissionController
 import com.whyfi.app.mission.MissionScreen
 import com.whyfi.app.scan.RadioKind
 import com.whyfi.app.ui.theme.WhyfiTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -71,7 +77,9 @@ private const val DASHBOARD_ICON = "📊"
 private const val SCAN_ICON = "🔍"
 private const val LAN_ICON = "🌐"
 private const val SETTINGS_ICON = "⚙️"
+private const val TAB_COUNT = 4
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WhyfiApp(
     settingsRepository: SettingsRepository,
@@ -85,6 +93,19 @@ private fun WhyfiApp(
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var detailRadio by rememberSaveable { mutableStateOf<String?>(null) }
     var showMission by rememberSaveable { mutableStateOf(false) }
+
+    // Backs the tab bar with a swipeable pager. selectedTab stays the
+    // source of truth for TabRow's indicator and survives rotation via
+    // rememberSaveable above; the pager is kept in sync with it in both
+    // directions below rather than replacing it, since PagerState's own
+    // Saver isn't wired through the same drill-down early-returns this
+    // composable already has.
+    val pagerState = rememberPagerState(initialPage = selectedTab) { TAB_COUNT }
+    val coroutineScope = rememberCoroutineScope()
+    LaunchedEffect(pagerState.currentPage) { selectedTab = pagerState.currentPage }
+    val goToTab: (Int) -> Unit = { index ->
+        coroutineScope.launch { pagerState.animateScrollToPage(index) }
+    }
 
     // Bound once here for the life of the app rather than per screen — see
     // rememberScanService's KDoc for why that matters.
@@ -128,29 +149,31 @@ private fun WhyfiApp(
 
     Column(modifier = Modifier.fillMaxSize()) {
         TabRow(selectedTabIndex = selectedTab) {
-            WhyfiTab(DASHBOARD_ICON, "Dashboard", 0, selectedTab) { selectedTab = 0 }
-            WhyfiTab(SCAN_ICON, "Scan", 1, selectedTab) { selectedTab = 1 }
-            WhyfiTab(LAN_ICON, "LAN", 2, selectedTab) { selectedTab = 2 }
-            WhyfiTab(SETTINGS_ICON, "Settings", 3, selectedTab) { selectedTab = 3 }
+            WhyfiTab(DASHBOARD_ICON, "Dashboard", 0, selectedTab) { goToTab(0) }
+            WhyfiTab(SCAN_ICON, "Scan", 1, selectedTab) { goToTab(1) }
+            WhyfiTab(LAN_ICON, "LAN", 2, selectedTab) { goToTab(2) }
+            WhyfiTab(SETTINGS_ICON, "Settings", 3, selectedTab) { goToTab(3) }
         }
 
         val openMission: () -> Unit = { showMission = true }
-        when (selectedTab) {
-            0 -> DashboardScreen(
-                service = service, uiState = uiState, onOpenDetail = openDetail,
-                onOpenMission = openMission, missionController = missionController,
-            )
-            1 -> ScanScreen(
-                service = service, uiState = uiState, onOpenDetail = openDetail,
-                onOpenMission = openMission, missionController = missionController,
-            )
-            2 -> LanScreen(service = service, uiState = uiState)
-            3 -> SettingsScreen(
-                settingsRepository = settingsRepository,
-                themePreference = themePreference,
-                onThemePreferenceChange = onThemePreferenceChange,
-                service = service,
-            )
+        HorizontalPager(state = pagerState, modifier = Modifier.weight(1f)) { page ->
+            when (page) {
+                0 -> DashboardScreen(
+                    service = service, uiState = uiState, onOpenDetail = openDetail,
+                    onOpenMission = openMission, missionController = missionController,
+                )
+                1 -> ScanScreen(
+                    service = service, uiState = uiState, onOpenDetail = openDetail,
+                    onOpenMission = openMission, missionController = missionController,
+                )
+                2 -> LanScreen(service = service, uiState = uiState)
+                3 -> SettingsScreen(
+                    settingsRepository = settingsRepository,
+                    themePreference = themePreference,
+                    onThemePreferenceChange = onThemePreferenceChange,
+                    service = service,
+                )
+            }
         }
     }
 }

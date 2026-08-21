@@ -19,6 +19,7 @@ import com.whyfi.app.data.local.PendingScanEntity
 import com.whyfi.app.data.local.WhyfiDatabase
 import com.whyfi.app.data.remote.BleObservationDto
 import com.whyfi.app.data.remote.CellObservationDto
+import com.whyfi.app.data.remote.FtmObservationDto
 import com.whyfi.app.data.remote.LanObservationDto
 import com.whyfi.app.data.remote.SatelliteObservationDto
 import com.whyfi.app.data.remote.ScanSessionUploadRequest
@@ -60,6 +61,7 @@ sealed interface PartialScanResult {
 class ScanCoordinator(private val context: Context) {
 
     val wifiScanManager = WifiScanManager(context)
+    val ftmRangingManager = FtmRangingManager(context)
     val cellularManager = CellularManager(context)
     val bleDeviceScanner = BleDeviceScanner(context)
     val gnssStatusManager = GnssStatusManager(context)
@@ -161,6 +163,37 @@ class ScanCoordinator(private val context: Context) {
 
         enqueueForUpload(payload)
         return payload
+    }
+
+    /** One manual Wi-Fi RTT/FTM ranging measurement against [bssid] — see
+     * ap-localization-design.md's V3 and scan/FtmRangingManager.kt. Not part
+     * of [runScan]'s regular multi-radio pass: triggered on demand (see
+     * ui/ScanDetailScreen.kt's "Range" action on an 802.11mc-responder WiFi
+     * row) against whatever the OS's own last-scan cache already holds for
+     * that BSSID (RTT ranging needs the real ScanResult object, not just the
+     * BSSID string). Uploads through the same outbox as every other scan —
+     * see [enqueueForUpload] — so it survives being offline. */
+    suspend fun rangeOnce(bssid: String): FtmObservationDto {
+        val scanResult = wifiScanManager.lastScanResults().firstOrNull { it.BSSID == bssid }
+            ?: return FtmObservationDto(bssid = bssid, success = false, status = "no_recent_scan")
+
+        val result = ftmRangingManager.range(scanResult)
+        val location = resolveLocation()
+        val payload = ScanSessionUploadRequest(
+            clientScanId = UUID.randomUUID().toString(),
+            startedAt = isoNow(),
+            completedAt = isoNow(),
+            latitude = location.primary?.latitude,
+            longitude = location.primary?.longitude,
+            locationAccuracyMeters = location.primary?.accuracy,
+            locationProvider = location.primary?.provider ?: "",
+            fusedLatitude = location.fused?.latitude,
+            fusedLongitude = location.fused?.longitude,
+            fusedAccuracyMeters = location.fused?.accuracy,
+            ftmObservations = listOf(result),
+        )
+        enqueueForUpload(payload)
+        return result
     }
 
     private suspend fun enqueueForUpload(payload: ScanSessionUploadRequest) {

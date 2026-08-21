@@ -26,6 +26,26 @@ enum class LocationSourcePreference {
 }
 
 /**
+ * Which algorithm estimates a transmitter's position. Mirrors the PWA's
+ * estimatorPreference.ts and the backend's scans/estimators.py — the wire
+ * value is the lowercase name those two use, so this enum converts rather
+ * than inventing its own spelling.
+ *
+ * CENTROID is the default because it's the original, always-available
+ * behaviour: no distance model to be wrong about, works for every radio type.
+ */
+enum class PositionEstimator(val wireValue: String, val label: String) {
+    CENTROID("centroid", "Signal-weighted centroid"),
+    STRONGEST("strongest", "Strongest reading"),
+    RSSI_MULTILATERATION("rssi_multilateration", "RSSI multilateration"),
+    FTM_MULTILATERATION("ftm_multilateration", "FTM multilateration");
+
+    companion object {
+        fun fromStored(value: String?): PositionEstimator = entries.find { it.name == value } ?: CENTROID
+    }
+}
+
+/**
  * Backend URL + sensor token, entered once on the Settings screen.
  *
  * Deliberately plain `SharedPreferences` (app-private storage, standard
@@ -62,6 +82,14 @@ class SettingsRepository(context: Context) {
     var locationSourcePreference: LocationSourcePreference
         get() = LocationSourcePreference.fromStored(prefs.getString(KEY_LOCATION_SOURCE, null))
         set(value) = prefs.edit { putString(KEY_LOCATION_SOURCE, value.name) }
+
+    /** Which estimator Mission view uses for a target's position (the cone
+     * apex). Device-local, same as [themePreference] — the PWA keeps its own
+     * in localStorage; there's no server-side user-settings model to sync
+     * through. */
+    var positionEstimator: PositionEstimator
+        get() = PositionEstimator.fromStored(prefs.getString(KEY_POSITION_ESTIMATOR, null))
+        set(value) = prefs.edit { putString(KEY_POSITION_ESTIMATOR, value.name) }
 
     /** Whether this device obeys start/stop instructions from the backend.
      *
@@ -139,6 +167,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_SENSOR_TOKEN = "sensor_token"
         private const val KEY_THEME = "theme_preference"
         private const val KEY_LOCATION_SOURCE = "location_source_preference"
+        private const val KEY_POSITION_ESTIMATOR = "position_estimator"
         private const val KEY_REMOTE_CONTROL = "remote_control_enabled"
         private const val KEY_OUTBOX_QUOTA_MB = "outbox_quota_mb"
         private const val KEY_ADAPTIVE_SCAN = "adaptive_scan_enabled"

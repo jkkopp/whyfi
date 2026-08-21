@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.wifi.ScanResult
 import android.net.wifi.WifiManager
 import com.whyfi.app.data.remote.WifiObservationDto
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -23,6 +24,14 @@ class WifiScanManager(private val context: Context) {
      * false warning for the common case of airplane mode + WiFi manually
      * re-enabled. */
     fun unavailableReason(): String? = if (!wifiManager.isWifiEnabled) "WiFi is turned off." else null
+
+    /** The platform's own last-scan cache — WifiManager keeps this current
+     * regardless of who triggered the most recent scan, so it's what
+     * FtmRangingManager reads to find a favorited BSSID's full [ScanResult]
+     * (RTT ranging needs the real result object, not just the BSSID
+     * string). No caching of our own needed. */
+    @SuppressLint("MissingPermission")
+    fun lastScanResults(): List<ScanResult> = wifiManager.scanResults
 
     @SuppressLint("MissingPermission")
     suspend fun scan(): List<WifiObservationDto> = suspendCancellableCoroutine { continuation ->

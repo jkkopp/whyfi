@@ -7,6 +7,11 @@
     <!-- Required by Android for WiFi/BLE/GNSS scan results, not just GPS -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
+    <!-- Wi-Fi RTT/FTM ranging against 802.11mc-responder APs (see
+         scan/FtmRangingManager.kt) — no extra runtime permission beyond
+         ACCESS_FINE_LOCATION above, just the hardware capability. -->
+    <uses-feature android:name="android.hardware.wifi.rtt" android:required="false" />
+
     <!-- Cellular serving/neighbor cell info -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 

@@ -43,6 +43,11 @@ data class DeviceRow(
      * substitutes a placeholder for hidden networks) and isn't safe to key
      * by. See ui/ScanDetailScreen.kt's favorite wiring. */
     val favoriteId: String? = null,
+    /** WiFi-only: whether this BSSID answered as an 802.11mc (FTM/RTT)
+     * responder in the scan that produced this row — gates the "Range"
+     * action in ui/ScanDetailScreen.kt. Always false for every other radio
+     * kind and for GONE rows (there's nothing to range against). */
+    val is80211mcResponder: Boolean = false,
 )
 
 data class DiffSummary(
@@ -128,6 +133,7 @@ object ScanDiff {
                 change = changeFor(compare, prior != null),
                 signalDelta = if (prior != null) ap.rssi - prior.rssi else null,
                 favoriteId = ap.ssid.takeIf { it.isNotBlank() },
+                is80211mcResponder = ap.is80211mcResponder,
             )
         }
 

@@ -19,6 +19,7 @@ data class ScanSessionUploadRequest(
     @SerializedName("fused_longitude") val fusedLongitude: Double? = null,
     @SerializedName("fused_accuracy_meters") val fusedAccuracyMeters: Float? = null,
     @SerializedName("wifi_observations") val wifiObservations: List<WifiObservationDto> = emptyList(),
+    @SerializedName("ftm_observations") val ftmObservations: List<FtmObservationDto> = emptyList(),
     @SerializedName("cell_observations") val cellObservations: List<CellObservationDto> = emptyList(),
     @SerializedName("ble_observations") val bleObservations: List<BleObservationDto> = emptyList(),
     @SerializedName("satellite_observations") val satelliteObservations: List<SatelliteObservationDto> = emptyList(),
@@ -38,6 +39,21 @@ data class WifiObservationDto(
     @SerializedName("is_80211mc_responder") val is80211mcResponder: Boolean = false,
     @SerializedName("operator_friendly_name") val operatorFriendlyName: String = "",
     @SerializedName("venue_name") val venueName: String = "",
+)
+
+/** One Wi-Fi RTT/FTM ranging result against a single BSSID — see
+ * scan/FtmRangingManager.kt. Sent standalone (its own ScanSessionUploadRequest,
+ * every other list empty) from a manual "Range" action, not as part of the
+ * regular multi-radio scan pass. */
+data class FtmObservationDto(
+    @SerializedName("bssid") val bssid: String,
+    @SerializedName("success") val success: Boolean,
+    @SerializedName("distance_mm") val distanceMm: Int? = null,
+    @SerializedName("distance_std_dev_mm") val distanceStdDevMm: Int? = null,
+    @SerializedName("rssi") val rssi: Int? = null,
+    @SerializedName("num_attempted_measurements") val numAttemptedMeasurements: Int? = null,
+    @SerializedName("num_successful_measurements") val numSuccessfulMeasurements: Int? = null,
+    @SerializedName("status") val status: String = "",
 )
 
 data class CellObservationDto(
@@ -114,11 +130,37 @@ data class CrashReportResponse(
     @SerializedName("id") val id: String,
 )
 
+/** Every estimator's answer for a Mission target, plus how far apart they
+ * land — mirrors compare_estimators() in backend/scans/estimators.py. Lets
+ * Mission view draw the cone from the user's chosen algorithm while showing
+ * what the others say. */
+data class MissionEstimatesDto(
+    @SerializedName("estimates") val estimates: Map<String, MissionEstimateDto> = emptyMap(),
+    @SerializedName("disagreements") val disagreements: List<MissionDisagreementDto> = emptyList(),
+)
+
+data class MissionEstimateDto(
+    @SerializedName("estimator") val estimator: String = "",
+    @SerializedName("available") val available: Boolean = false,
+    @SerializedName("reason") val reason: String? = null,
+    @SerializedName("fell_back_to") val fellBackTo: String? = null,
+    @SerializedName("lat") val lat: Double? = null,
+    @SerializedName("lng") val lng: Double? = null,
+    @SerializedName("sample_count") val sampleCount: Int = 0,
+)
+
+data class MissionDisagreementDto(
+    @SerializedName("a") val a: String = "",
+    @SerializedName("b") val b: String = "",
+    @SerializedName("distance_m") val distanceM: Double = 0.0,
+)
+
 /** Mirrors backend/scans/views.py's mission_wifi_observations() response.
  * Fed to mission/Geo.kt's weightedCentroid/conePolygon to render the Mission
  * view's gradient-cone map — see mission/MissionController.kt. */
 data class MissionWifiObservationsResponse(
     @SerializedName("ssid") val ssid: String,
+    @SerializedName("estimates") val estimates: MissionEstimatesDto? = null,
     @SerializedName("points") val points: List<MissionWifiPointDto> = emptyList(),
     @SerializedName("truncated") val truncated: Boolean = false,
     @SerializedName("observation_limit") val observationLimit: Int = 0,
@@ -138,6 +180,7 @@ data class MissionWifiPointDto(
  * BLE sibling of MissionWifiObservationsResponse. */
 data class MissionBleObservationsResponse(
     @SerializedName("identifier") val identifier: String,
+    @SerializedName("estimates") val estimates: MissionEstimatesDto? = null,
     @SerializedName("points") val points: List<MissionBlePointDto> = emptyList(),
     @SerializedName("truncated") val truncated: Boolean = false,
     @SerializedName("observation_limit") val observationLimit: Int = 0,
@@ -156,6 +199,7 @@ data class MissionBlePointDto(
  * cellular sibling of MissionWifiObservationsResponse. */
 data class MissionCellObservationsResponse(
     @SerializedName("tower_key") val towerKey: String,
+    @SerializedName("estimates") val estimates: MissionEstimatesDto? = null,
     @SerializedName("points") val points: List<MissionCellPointDto> = emptyList(),
     @SerializedName("truncated") val truncated: Boolean = false,
     @SerializedName("observation_limit") val observationLimit: Int = 0,

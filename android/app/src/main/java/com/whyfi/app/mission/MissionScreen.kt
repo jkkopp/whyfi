@@ -11,8 +11,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -25,12 +30,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.whyfi.app.data.FavoritesRepository
-import com.whyfi.app.scan.LocationSnapshot
+import com.whyfi.app.data.PositionEstimator
 import com.whyfi.app.scan.RadioKind
 import com.whyfi.app.scan.ScanForegroundService
 import java.io.File
@@ -67,44 +71,16 @@ fun MissionScreen(
             .sortedBy { it.identifier }
     }
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
 
-    // Off by default — the map centers on the estimated position (the
-    // weighted centroid of the currently loaded readings), which is what
-    // most people want to look at. But with a lot of near-location matches
-    // (BLE especially: plenty of separate devices/readings can legitimately
-    // sit within the near-radius of wherever you're standing), that
-    // estimate can land somewhere other than where you actually are. This
-    // only changes what the camera looks at — the cones/estimate itself are
-    // still always centroid-based, unaffected by this toggle.
-    var centerOnMyLocation by remember { mutableStateOf(false) }
-    val myLocationCenter = remember(centerOnMyLocation, uiState.livePosition) {
-        if (!centerOnMyLocation) {
-            null
-        } else {
-            // While tracking this updates live (see MissionController.start's
-            // location listener); otherwise it's a one-shot "last known"
-            // read, re-fetched only when the toggle itself is switched on.
-            uiState.livePosition ?: LocationSnapshot.lastKnown(context)?.let { LatLng(it.latitude, it.longitude) }
-        }
-    }
+    // The 250m near-filter keeps a favorited target's sightings from some
+    // other place entirely (a travel router, a BLE device that moved) from
+    // corrupting the estimate. Fixed rather than user-toggleable: the
+    // escape hatch that used to disable it lived here and was removed.
+    val nearRadius = MissionController.DEFAULT_NEAR_RADIUS_M
 
-    // Off by default — the 250m near-filter is what keeps a favorited
-    // target's sightings from some other place entirely (a travel router, a
-    // BLE device that moved) from corrupting the estimate. But that same
-    // filter can legitimately hide readings you still want: a favorited BLE
-    // device really was seen far from where you're standing now. This toggle
-    // swaps DEFAULT_NEAR_RADIUS_M for SHOW_ALL_RADIUS_M, effectively
-    // disabling the filter without a separate backend endpoint (see that
-    // constant's KDoc). Re-runs the current target on change.
-    var showAllReadings by remember { mutableStateOf(false) }
-    val nearRadius = if (showAllReadings) MissionController.SHOW_ALL_RADIUS_M else MissionController.DEFAULT_NEAR_RADIUS_M
-
-    // Shared by the favorite chips and the show-all toggle: re-run [target]
-    // at [radius], keeping tracking-vs-one-shot state as it is. Passing the
-    // radius explicitly (rather than relying on selectOrRetarget's captured
-    // value) lets the toggle apply the *new* radius on the same interaction
-    // that flips it, before a recomposition has updated [nearRadius].
+    // Re-runs [target] at [radius], keeping tracking-vs-one-shot state as it
+    // is. Used by the favorite chips and by the estimator selector, which
+    // needs a refetch so the new algorithm's apex arrives.
     fun runTarget(target: MissionTarget, radius: Double) {
         if (uiState.isTracking) {
             missionController.start(target, service, radius)
@@ -140,11 +116,8 @@ fun MissionScreen(
                         "Locating…"
                     } else if (uiState.error != null) {
                         ""
-                    } else if (showAllReadings) {
-                        "No readings of \"${uiState.target?.identifier}\" found at all yet."
                     } else {
-                        "No readings of \"${uiState.target?.identifier}\" found near your current location. " +
-                            "Turn on \"Show all readings\" to include ones recorded elsewhere."
+                        "No readings of \"${uiState.target?.identifier}\" found near your current location."
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(horizontal = 32.dp),
@@ -152,8 +125,8 @@ fun MissionScreen(
                 else -> MissionMap(
                     points = uiState.points,
                     livePosition = uiState.livePosition,
-                    centerOverride = myLocationCenter,
                     modifier = Modifier.fillMaxSize(),
+                    estimatedApex = selectedEstimate(uiState),
                 )
             }
         }
@@ -209,56 +182,25 @@ fun MissionScreen(
                     }
                 }
 
-                // Available as soon as a target is picked, not gated on
-                // points existing — an empty result is often *why* you'd
-                // reach for it (the near-filter excluded everything), so it
-                // has to be reachable in exactly that state.
+                // Which algorithm decides where the target is. Lives here
+                // rather than in Settings because this is the screen where
+                // the choice visibly changes something — the cone apex moves
+                // as you switch, with the readout below showing how far the
+                // others land from it.
                 if (uiState.target != null) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                    ) {
-                        Switch(
-                            checked = showAllReadings,
-                            onCheckedChange = { showAll ->
-                                showAllReadings = showAll
-                                val target = uiState.target ?: return@Switch
-                                val radius = if (showAll) {
-                                    MissionController.SHOW_ALL_RADIUS_M
-                                } else {
-                                    MissionController.DEFAULT_NEAR_RADIUS_M
-                                }
-                                runTarget(target, radius)
-                            },
-                        )
-                        Text(
-                            "Show all readings (ignore distance)",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(start = 4.dp),
-                        )
-                    }
+                    MissionEstimatorSelector(
+                        current = uiState.estimator,
+                        onSelect = { selected ->
+                            missionController.setEstimator(selected)
+                            uiState.target?.let { runTarget(it, nearRadius) }
+                        },
+                    )
                 }
 
                 if (uiState.points.isNotEmpty()) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                    ) {
-                        // Off by default: the map centers on the estimated
-                        // position (weighted centroid of the loaded
-                        // readings). With a lot of near-location matches —
-                        // BLE especially, where plenty of separate devices
-                        // legitimately sit within the near-radius of
-                        // wherever you're standing — that estimate can land
-                        // somewhere other than where you actually are.
-                        Switch(checked = centerOnMyLocation, onCheckedChange = { centerOnMyLocation = it })
-                        Text(
-                            "Center on my location",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(start = 4.dp),
-                        )
-                    }
+                    EstimatorReadout(uiState)
                 }
+
             }
         }
 
@@ -270,7 +212,7 @@ fun MissionScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    statusBarText(uiState, showAllReadings),
+                    statusBarText(uiState),
                     style = MaterialTheme.typography.bodySmall,
                     color = if (uiState.error != null) {
                         MaterialTheme.colorScheme.error
@@ -283,11 +225,9 @@ fun MissionScreen(
     }
 }
 
-private fun statusBarText(uiState: MissionUiState, showAllReadings: Boolean): String {
-    // "near your current location" is only true when the near-filter is on;
-    // in show-all mode the readings can be from anywhere the target was ever
-    // seen, so drop that qualifier rather than state something false.
-    val where = if (showAllReadings) "everywhere it's been seen" else "near your current location"
+private fun statusBarText(uiState: MissionUiState): String {
+    // Always true now that the near-filter is fixed on — see nearRadius.
+    val where = "near your current location"
     return when {
         uiState.isLoading -> "Locating…"
         uiState.error != null -> uiState.error
@@ -308,16 +248,18 @@ private fun statusBarText(uiState: MissionUiState, showAllReadings: Boolean): St
 private fun MissionMap(
     points: List<MissionPoint>,
     livePosition: LatLng?,
-    centerOverride: LatLng?,
     modifier: Modifier = Modifier,
+    estimatedApex: LatLng? = null,
 ) {
     val density = LocalDensity.current.density
-    val overlay = remember(points, livePosition) { buildOverlay(points, livePosition, density) }
-    // centerOverride only changes what the camera looks at — the cone
-    // estimate itself (buildOverlay's apex) always stays weighted-centroid-
-    // based, regardless of this toggle.
-    val center = remember(points, centerOverride) {
-        centerOverride ?: Geo.weightedCentroid(points.map { WeightedLatLng(it.lat, it.lng, it.weight) })
+    val overlay = remember(points, livePosition, estimatedApex) {
+        buildOverlay(points, livePosition, density, estimatedApex)
+    }
+    // The camera looks at the same place the cone points from — the selected
+    // estimator's position, falling back to a local centroid when the backend
+    // hasn't supplied one.
+    val center = remember(points, estimatedApex) {
+        estimatedApex ?: Geo.weightedCentroid(points.map { WeightedLatLng(it.lat, it.lng, it.weight) })
     }
 
     AndroidView(
@@ -349,8 +291,104 @@ private fun MissionMap(
     )
 }
 
-private fun buildOverlay(points: List<MissionPoint>, livePosition: LatLng?, density: Float): ConeOverlay {
-    val apex = Geo.weightedCentroid(points.map { WeightedLatLng(it.lat, it.lng, it.weight) })
+/** Estimator picker, on the screen where switching it visibly moves the cone
+ * apex. A dropdown rather than chips: four algorithm names don't fit across a
+ * phone, and this bar is already crowded. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MissionEstimatorSelector(current: PositionEstimator, onSelect: (PositionEstimator) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = !expanded },
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+    ) {
+        OutlinedTextField(
+            value = current.label,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("Position estimator") },
+            textStyle = MaterialTheme.typography.bodySmall,
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier.menuAnchor().fillMaxWidth(),
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            PositionEstimator.entries.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option.label) },
+                    onClick = {
+                        onSelect(option)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** The position from the estimator the user selected, or null when that
+ * estimator didn't run (no readings, or it needs data this target lacks) —
+ * callers fall back to a local centroid rather than showing nothing. */
+private fun selectedEstimate(uiState: MissionUiState): LatLng? {
+    val estimate = uiState.estimates?.estimates?.get(uiState.estimator.wireValue) ?: return null
+    val lat = estimate.lat ?: return null
+    val lng = estimate.lng ?: return null
+    return LatLng(lat, lng)
+}
+
+/** What each algorithm says about this target, and how far apart they land.
+ * Shown in the field precisely because disagreement is the signal: when they
+ * cluster the position is trustworthy, and when they don't, walking toward
+ * any single one of them is a guess. */
+@Composable
+private fun EstimatorReadout(uiState: MissionUiState) {
+    val estimates = uiState.estimates ?: return
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+        Text(
+            "Position estimates (using ${uiState.estimator.label})",
+            style = MaterialTheme.typography.labelMedium,
+        )
+        PositionEstimator.entries.forEach { option ->
+            val estimate = estimates.estimates[option.wireValue]
+            val summary = when {
+                estimate == null -> "—"
+                !estimate.available -> "unavailable"
+                estimate.lat == null || estimate.lng == null -> "—"
+                else -> {
+                    val apex = selectedEstimate(uiState)
+                    val delta = if (apex != null) {
+                        Geo.haversineDistanceMeters(apex.lat, apex.lng, estimate.lat, estimate.lng)
+                    } else {
+                        0.0
+                    }
+                    if (option == uiState.estimator) "selected" else "%.0f m away".format(delta)
+                }
+            }
+            Text(
+                "${option.label}: $summary",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (option == uiState.estimator) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+    }
+}
+
+/** [estimatedApex] is the backend's answer under the estimator the user
+ * selected in Settings (see PositionEstimator). Falls back to a locally
+ * computed weighted centroid when the backend didn't supply one — an older
+ * backend, or a fetch that hasn't landed yet — so Mission view keeps working
+ * rather than losing its cone entirely. */
+private fun buildOverlay(
+    points: List<MissionPoint>,
+    livePosition: LatLng?,
+    density: Float,
+    estimatedApex: LatLng? = null,
+): ConeOverlay {
+    val apex = estimatedApex ?: Geo.weightedCentroid(points.map { WeightedLatLng(it.lat, it.lng, it.weight) })
     val historicalShapes = points.map { point ->
         val target = LatLng(point.lat, point.lng)
         val color = SignalColor.signalStrengthColorArgb(point.weight)

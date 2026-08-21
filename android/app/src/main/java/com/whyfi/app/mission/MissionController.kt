@@ -1,8 +1,10 @@
 package com.whyfi.app.mission
 
 import android.content.Context
+import com.whyfi.app.data.PositionEstimator
 import com.whyfi.app.data.SettingsRepository
 import com.whyfi.app.data.remote.ApiClientFactory
+import com.whyfi.app.data.remote.MissionEstimatesDto
 import com.whyfi.app.scan.LocationSnapshot
 import com.whyfi.app.scan.RadioKind
 import com.whyfi.app.scan.ScanForegroundService
@@ -45,6 +47,16 @@ data class MissionUiState(
      * emphasized "you are here" cone on every update. Null when not
      * tracking or no fix has arrived yet. */
     val livePosition: LatLng? = null,
+    /** What each estimator says about this target's position, from the
+     * backend (see compare_estimators in scans/estimators.py). Drives both
+     * the cone apex (for the estimator the user selected) and the
+     * per-algorithm readout. Null when the backend didn't supply one — e.g.
+     * an older backend, or no readings at all — in which case the apex falls
+     * back to a locally computed centroid. */
+    val estimates: MissionEstimatesDto? = null,
+    /** The estimator the user picked in Settings, carried into UI state so
+     * the screen doesn't have to re-read SharedPreferences to label things. */
+    val estimator: PositionEstimator = PositionEstimator.CENTROID,
 )
 
 /**
@@ -132,6 +144,15 @@ class MissionController(
         }
     }
 
+    /** Switches the position estimator and persists it. The caller re-runs
+     * the current target afterwards so the new algorithm's apex is fetched —
+     * this only records the choice, it doesn't refetch on its own, so
+     * changing it while not tracking doesn't fire a surprise network call. */
+    fun setEstimator(estimator: PositionEstimator) {
+        settingsRepository.positionEstimator = estimator
+        _uiState.value = _uiState.value.copy(estimator = estimator)
+    }
+
     fun stop() {
         stopTrackingJobs()
         _uiState.value = _uiState.value.copy(isTracking = false, livePosition = null)
@@ -182,6 +203,7 @@ class MissionController(
         try {
             val api = ApiClientFactory.create(backendUrl)
             val auth = "Token $token"
+            var estimates: MissionEstimatesDto? = null
             val (points, truncated) = when (target.kind) {
                 RadioKind.WIFI -> {
                     val response = api.missionWifiObservations(
@@ -192,6 +214,7 @@ class MissionController(
                         _uiState.value = _uiState.value.copy(isLoading = false, error = "Fetch failed (HTTP ${response.code()}).")
                         return
                     }
+                    estimates = body.estimates
                     body.points.map { MissionPoint(it.lat, it.lng, it.weight) } to body.truncated
                 }
                 RadioKind.BLE -> {
@@ -203,6 +226,7 @@ class MissionController(
                         _uiState.value = _uiState.value.copy(isLoading = false, error = "Fetch failed (HTTP ${response.code()}).")
                         return
                     }
+                    estimates = body.estimates
                     body.points.map { MissionPoint(it.lat, it.lng, it.weight) } to body.truncated
                 }
                 RadioKind.CELLULAR -> {
@@ -214,11 +238,19 @@ class MissionController(
                         _uiState.value = _uiState.value.copy(isLoading = false, error = "Fetch failed (HTTP ${response.code()}).")
                         return
                     }
+                    estimates = body.estimates
                     body.points.map { MissionPoint(it.lat, it.lng, it.weight) } to body.truncated
                 }
                 RadioKind.SATELLITE -> error("SATELLITE has no Mission target — this is a caller bug, not a real state.")
             }
-            _uiState.value = _uiState.value.copy(isLoading = false, points = points, truncated = truncated, error = null)
+            _uiState.value = _uiState.value.copy(
+                isLoading = false,
+                points = points,
+                truncated = truncated,
+                error = null,
+                estimates = estimates,
+                estimator = settingsRepository.positionEstimator,
+            )
         } catch (e: IOException) {
             _uiState.value = _uiState.value.copy(isLoading = false, error = "Could not reach the backend: ${e.message}")
         }
@@ -226,20 +258,6 @@ class MissionController(
 
     companion object {
         const val DEFAULT_NEAR_RADIUS_M = 250.0
-
-        /** "Show all readings" mode (see MissionScreen.kt) — passed as
-         * radiusMeters to effectively disable the near-location filter
-         * without needing a separate unfiltered backend endpoint: the
-         * backend's haversine check just never excludes anything at this
-         * radius. Useful when the near filter is dropping readings you
-         * still want to see — BLE especially, where a favorited device may
-         * genuinely have been seen far from where you're standing now (it
-         * moved, or you're looking it up somewhere new), not just "noise"
-         * the filter is right to exclude. Comfortably larger than any real
-         * great-circle distance on Earth (~20,000km, half the
-         * circumference) rather than Double.MAX_VALUE, so it stays a
-         * meaningful number if ever logged/displayed. */
-        const val SHOW_ALL_RADIUS_M = 20_000_000.0
 
         /** Fallback shape radius when a cone can't be drawn (apex too close
          * to the reading, or only one reading exists so far) — see
