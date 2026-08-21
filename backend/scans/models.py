@@ -114,6 +114,38 @@ class WiFiObservation(models.Model):
         return f"{self.access_point_id} @ {self.rssi}dBm"
 
 
+class FtmRangingObservation(models.Model):
+    """One Wi-Fi RTT/FTM ranging result against a single 802.11mc-responder
+    AP (WiFiObservation.is_80211mc_responder) — a manually triggered,
+    on-demand measurement, not part of the regular scan pass. Kept separate
+    from WiFiObservation because it's a materially different raw measurement
+    (a distance estimate + quality, not an RSSI reading), per
+    ap-localization-design.md's rule that Observation rows stay raw and
+    immutable per measurement type so estimation algorithms can later be
+    re-run against the originals."""
+
+    scan_session = models.ForeignKey(ScanSession, on_delete=models.CASCADE, related_name="ftm_observations")
+    access_point = models.ForeignKey(AccessPoint, on_delete=models.CASCADE, related_name="ftm_observations")
+    success = models.BooleanField(default=False)
+    distance_mm = models.IntegerField(null=True, blank=True)
+    distance_std_dev_mm = models.IntegerField(null=True, blank=True)
+    rssi = models.IntegerField(null=True, blank=True)
+    num_attempted_measurements = models.IntegerField(null=True, blank=True)
+    num_successful_measurements = models.IntegerField(null=True, blank=True)
+    # Android RangingResult.getStatus() as a string, e.g. "success"/"fail" —
+    # kept as free text rather than a choices field since Android's own
+    # status constants may grow across API levels.
+    status = models.CharField(max_length=32, blank=True)
+    observed_at = models.DateTimeField()
+
+    class Meta:
+        indexes = [models.Index(fields=["access_point", "observed_at"])]
+        ordering = ["-observed_at"]
+
+    def __str__(self):
+        return f"{self.access_point_id} @ {self.distance_mm}mm" if self.success else f"{self.access_point_id} (failed)"
+
+
 class CellTower(models.Model):
     """A physical cell tower/sector, deduplicated by MCC+MNC+LAC/TAC+CellID
     across all sessions — mirrors AccessPoint's role for WiFi. Readings
@@ -351,6 +383,173 @@ class LANDevice(models.Model):
 
     def __str__(self):
         return f"{self.ip_address} ({self.hostname or self.mac_address or 'unknown'})"
+
+
+class FloorPlan(models.Model):
+    """An uploaded floor plan the operator places measurement points on.
+
+    Exists because GPS is unusable indoors and OSM renders a house as a
+    featureless polygon — neither can tell you which room you were standing
+    in, which is the whole question when hunting weak coverage at home.
+
+    `image` is a FileField rather than an ImageField deliberately: ImageField
+    requires Pillow, which isn't a dependency here, and nothing server-side
+    needs to decode the file. The browser already knows the pixel dimensions
+    at upload time and sends them.
+
+    The two anchor pairs are what make a click on the plan mean a real
+    position: one recognisable spot identified both on the plan (pixels) and
+    in the world (lat/lng), twice. See scans/floorplan.py.
+    """
+
+    name = models.CharField(max_length=100)
+    image = models.FileField(upload_to="floorplans/")
+    image_width_px = models.IntegerField()
+    image_height_px = models.IntegerField()
+
+    anchor1_image_x = models.FloatField(null=True, blank=True)
+    anchor1_image_y = models.FloatField(null=True, blank=True)
+    anchor1_lat = models.FloatField(null=True, blank=True)
+    anchor1_lng = models.FloatField(null=True, blank=True)
+    anchor2_image_x = models.FloatField(null=True, blank=True)
+    anchor2_image_y = models.FloatField(null=True, blank=True)
+    anchor2_lat = models.FloatField(null=True, blank=True)
+    anchor2_lng = models.FloatField(null=True, blank=True)
+
+    # The transform itself, stored rather than re-derived from the anchors on
+    # every use. Two-point anchoring *computes* these, but clicking two points
+    # on a map at house scale is imprecise, so both stay directly editable
+    # afterwards — nudging the bearing a couple of degrees is far easier than
+    # re-clicking anchors until the rotation happens to come out right.
+    meters_per_pixel = models.FloatField(null=True, blank=True)
+    # Compass bearing of the plan's "up" direction (image -y). 0 = the top of
+    # the plan points north.
+    bearing_deg = models.FloatField(null=True, blank=True)
+
+    # The building's real footprint, traced on the plan as a closed polygon of
+    # image-pixel vertices: [{"x": 12.5, "y": 400.0}, ...]. Empty means "not
+    # traced", and everything falls back to the image's own rectangle.
+    #
+    # The image stays a rectangle — it's a raster, and this is not a crop. The
+    # polygon is what the *building* occupies inside that rectangle, which
+    # matters twice over: a bounding box drawn on the map sits over the
+    # neighbour's garden on any L-shaped house, and the interpolated heatmap
+    # otherwise paints coverage across pixels that are outside the walls
+    # entirely. Nothing in the pixel->world transform assumes four corners
+    # (see scans/floorplan.image_to_world), so an arbitrary polygon needs no
+    # new maths — only somewhere to keep it.
+    outline_points = models.JSONField(default=list, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    @property
+    def is_calibrated(self):
+        """Calibrated means there's a usable transform, which now hinges on
+        the stored scale/bearing rather than on anchor 2 — the second anchor
+        is only how they're first derived, and an operator who has since
+        adjusted the bearing by hand shouldn't be told the plan is
+        uncalibrated."""
+        return all(
+            value is not None
+            for value in (
+                self.anchor1_image_x, self.anchor1_image_y, self.anchor1_lat, self.anchor1_lng,
+                self.meters_per_pixel, self.bearing_deg,
+            )
+        )
+
+    def __str__(self):
+        return f"{self.name} ({'calibrated' if self.is_calibrated else 'not calibrated'})"
+
+
+class GroundTruthPosition(models.Model):
+    """A position the operator asserts is correct, from surveying rather than
+    from a radio estimate.
+
+    Two kinds, serving different purposes:
+
+    - ACCESS_POINT — where an AP really is. Turns "these four estimators
+      disagree by 40m" into "this one is wrong by 40m", and is what the
+      path-loss calibration is fitted against.
+    - OBSERVER — where the phone really was for one scan session, correcting
+      a bad GPS fix. This is the higher-leverage of the two: a wrong observer
+      position corrupts every estimator equally, and no amount of better maths
+      recovers from it.
+
+    Deliberately a separate table rather than a column on ScanSession or
+    AccessPoint. ap-localization-design.md requires observations stay
+    immutable raw measurements with derived/asserted values stored apart, so a
+    pin overlays the recorded fix rather than overwriting it — which also
+    means the override can be switched off to compare the two.
+    """
+
+    class Kind(models.TextChoices):
+        ACCESS_POINT = "AP", "Access point"
+        OBSERVER = "OBSERVER", "Observer position"
+
+    kind = models.CharField(max_length=8, choices=Kind.choices)
+    # BSSID for ACCESS_POINT, ScanSession id (as text) for OBSERVER. A plain
+    # char key rather than two nullable FKs — the two targets have different
+    # primary key types, and this table is read by key, never joined through.
+    target_key = models.CharField(max_length=64)
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    label = models.CharField(max_length=128, blank=True)
+    note = models.CharField(max_length=255, blank=True)
+    # Set when the pin was placed by clicking a floor plan. latitude/longitude
+    # are *derived* from these (see scans/floorplan.image_to_world) so the pin
+    # feeds the normal estimator pipeline; the pixel coordinates are kept so
+    # the plan can redraw the pin exactly where it was clicked, without the
+    # frontend needing to invert the transform.
+    floor_plan = models.ForeignKey(
+        "FloorPlan", null=True, blank=True, on_delete=models.SET_NULL, related_name="placements"
+    )
+    image_x = models.FloatField(null=True, blank=True)
+    image_y = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["kind", "target_key"], name="unique_ground_truth_target"),
+        ]
+        indexes = [models.Index(fields=["kind"])]
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"{self.get_kind_display()} {self.target_key} @ {self.latitude},{self.longitude}"
+
+
+class CalibratedRangeModel(models.Model):
+    """A path-loss model fitted to this deployment's own measurements, rather
+    than the generic indoor-survey constants in estimators.RANGE_MODEL.
+
+    Stored (not computed on the fly) and applied only when `is_active`,
+    because silently swapping in hand-fitted constants would make every
+    historical estimate irreproducible — you'd have no way to tell whether a
+    number changed because the data changed or because the model did.
+
+    `r_squared` and the distance range are kept alongside because a fit is
+    only meaningful over the distances it was fitted across: constants
+    derived entirely from 5-10m readings say nothing useful about 60m.
+    """
+
+    radio_kind = models.CharField(max_length=16, unique=True)  # wifi/ble/cellular
+    ref_rssi_at_1m = models.FloatField()
+    path_loss_exponent = models.FloatField()
+    r_squared = models.FloatField()
+    sample_count = models.IntegerField()
+    min_distance_m = models.FloatField()
+    max_distance_m = models.FloatField()
+    is_active = models.BooleanField(default=False)
+    fitted_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        state = "active" if self.is_active else "inactive"
+        return f"{self.radio_kind}: ref={self.ref_rssi_at_1m:.1f} n={self.path_loss_exponent:.2f} ({state})"
 
 
 class GeocodedLocation(models.Model):

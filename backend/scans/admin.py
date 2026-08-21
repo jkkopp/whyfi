@@ -5,8 +5,12 @@ from .models import (
     BLEDevice,
     BLEObservation,
     CellObservation,
+    CalibratedRangeModel,
     CellTower,
+    FloorPlan,
+    FtmRangingObservation,
     GeocodedLocation,
+    GroundTruthPosition,
     LANDevice,
     LANObservation,
     SatelliteObservation,
@@ -28,6 +32,7 @@ class ScanSessionAdmin(admin.ModelAdmin):
 
 
 admin.site.register(WiFiObservation)
+admin.site.register(FtmRangingObservation)
 admin.site.register(CellTower)
 admin.site.register(CellObservation)
 admin.site.register(BLEObservation)
@@ -35,4 +40,7 @@ admin.site.register(SatelliteObservation)
 admin.site.register(LANObservation)
 admin.site.register(LANDevice)
 admin.site.register(GeocodedLocation)
+admin.site.register(GroundTruthPosition)
+admin.site.register(FloorPlan)
+admin.site.register(CalibratedRangeModel)
 admin.site.register(BLEDevice)
