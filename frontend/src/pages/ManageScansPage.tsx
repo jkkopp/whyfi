@@ -54,6 +54,59 @@ export function ManageScansPage() {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
+  const [ioBusy, setIoBusy] = useState(false);
+  const [ioMessage, setIoMessage] = useState<string | null>(null);
+  const [ioError, setIoError] = useState<string | null>(null);
+
+  /** Downloads the current view's sessions as a re-importable JSON file.
+   *
+   * The payload is the same shape the ingest endpoint accepts, so this file is
+   * a restore point rather than a report — importing it later recreates the
+   * data exactly, and importing it twice is a no-op. */
+  async function handleExport() {
+    setIoBusy(true);
+    setIoError(null);
+    setIoMessage(null);
+    try {
+      const bundle = await api.exportScanSessions({});
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `whyfi-scans-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setIoMessage(
+        bundle.truncated
+          ? `Exported ${bundle.session_count} scans — this hit the ${bundle.session_limit} cap, so it is NOT a complete backup. Narrow the range and export again.`
+          : `Exported ${bundle.session_count} scans.`,
+      );
+    } catch {
+      setIoError("Export failed.");
+    } finally {
+      setIoBusy(false);
+    }
+  }
+
+  async function handleImport(file: File) {
+    setIoBusy(true);
+    setIoError(null);
+    setIoMessage(null);
+    try {
+      const bundle = JSON.parse(await file.text());
+      const result = await api.importScanSessions(bundle);
+      setIoMessage(
+        `Imported ${result.created} scan(s); ${result.skipped} already present` +
+          (result.failed_count ? `; ${result.failed_count} failed` : "") +
+          ".",
+      );
+      setRefreshKey((k) => k + 1);
+    } catch {
+      setIoError("Import failed — is that a whyfi export file?");
+    } finally {
+      setIoBusy(false);
+    }
+  }
   const [resolveError, setResolveError] = useState<string | null>(null);
 
   const rows: SearchableRow[] = (data?.results ?? []).map((s) => ({
@@ -151,6 +204,33 @@ export function ManageScansPage() {
         satellite/LAN observation tied to it — the aggregate network/tower/device rows themselves (BSSIDs, cell
         towers, LAN devices) are left in place even if this was their only sighting.
       </p>
+
+      <div className="control-row">
+        <button onClick={handleExport} disabled={ioBusy}>
+          {ioBusy ? "Working…" : "Export scans"}
+        </button>
+        <label className="import-label">
+          Import scans{" "}
+          <input
+            type="file"
+            accept="application/json,.json"
+            disabled={ioBusy}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              // Reset so re-picking the same file fires change again.
+              e.target.value = "";
+              if (file) handleImport(file);
+            }}
+          />
+        </label>
+      </div>
+      <p className="page-hint">
+        Export writes every scan and its observations to a JSON file in the same format the app uploads with, so it's
+        a restore point rather than a report. Importing it recreates the data; importing the same file twice changes
+        nothing, because scans are matched on their original id.
+      </p>
+      {ioMessage && <p className={ioMessage.includes("NOT a complete") ? "warning-text" : "page-hint"}>{ioMessage}</p>}
+      {ioError && <p className="error-text">{ioError}</p>}
 
       <TableControls
         searchValue={query}

@@ -1,11 +1,25 @@
 import { useState } from "react";
 import { getBackendUrlOverride, setBackendUrlOverride } from "../../api/client";
+import {
+  ESTIMATOR_DESCRIPTIONS,
+  ESTIMATOR_LABELS,
+  POSITION_ESTIMATORS,
+  getEstimatorPreference,
+  setEstimatorPreference,
+  type PositionEstimator,
+} from "../../estimatorPreference";
 import { getThemePreference, setThemePreference, type ThemePreference } from "../../theme";
 
 export function GeneralSettingsTab() {
   const [url, setUrl] = useState(getBackendUrlOverride() ?? "");
   const [saved, setSaved] = useState(false);
   const [theme, setTheme] = useState<ThemePreference>(getThemePreference());
+  const [estimator, setEstimator] = useState<PositionEstimator>(getEstimatorPreference());
+
+  function handleEstimatorChange(next: PositionEstimator) {
+    setEstimator(next);
+    setEstimatorPreference(next);
+  }
 
   function handleSave() {
     setBackendUrlOverride(url.trim() || null);
@@ -33,6 +47,34 @@ export function GeneralSettingsTab() {
         ))}
       </div>
 
+      <h2>Position estimator</h2>
+      <p className="page-hint">
+        How the estimated position of a transmitter is calculated, everywhere it's shown — the marker on the Heatmap,
+        the estimated location on each WiFi/BLE/cell tower detail page, and the default on the Localization page.
+        Changing this changes what those dots mean, so it's worth comparing them on one device you know the real
+        position of before trusting any of them. The Localization page can show all four side by side.
+      </p>
+
+      <label className="field">
+        <span>Algorithm</span>
+        <select value={estimator} onChange={(e) => handleEstimatorChange(e.target.value as PositionEstimator)}>
+          {POSITION_ESTIMATORS.map((option) => (
+            <option key={option} value={option}>
+              {ESTIMATOR_LABELS[option]}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="page-hint">{ESTIMATOR_DESCRIPTIONS[estimator]}</p>
+      {estimator === "ftm_multilateration" && (
+        <p className="page-hint">
+          Note: only WiFi APs you've ranged from the Android app have FTM data. Anything else — every BLE device and
+          cell tower, and any AP you haven't ranged — falls back to the weighted centroid, and says so where it's
+          shown.
+        </p>
+      )}
+
+      <h2>Backend</h2>
       <p className="page-hint">
         By default this PWA talks to the backend that served it. If you installed it to your home screen and want it
         to point at a different self-hosted whyfi instance on your LAN, set that here — note that login only works

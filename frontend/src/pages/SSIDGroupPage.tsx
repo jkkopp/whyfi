@@ -11,9 +11,9 @@ import { SortableTh } from "../components/SortableTh";
 import { SimpleLineChart } from "../components/SimpleLineChart";
 import { COVERAGE_STROKE_COLOR, classifyDeviceCoverage, soloShapes } from "../coverageConfig";
 import { useFilter } from "../context/FilterContext";
+import { getEstimatorPreference } from "../estimatorPreference";
 import { filterBySearch } from "../searchFilter";
 import { resolveCurrentScanMultiDevice } from "../currentScan";
-import { weightedCentroid } from "../geo";
 import {
   describeObservedSpan,
   describeSignalRange,
@@ -30,6 +30,9 @@ const PALETTE = ["#2dd4bf", "#f87171", "#60a5fa", "#fbbf24", "#a78bfa", "#34d399
 export function SSIDGroupPage() {
   const { ssid = "" } = useParams();
   const filter = useFilter();
+  // Read once per render rather than held in state: the setting only changes
+  // on the Settings page, which navigating back from remounts this anyway.
+  const estimator = getEstimatorPreference();
   const { printing, onMapReady, printButtonProps } = useReportPrinting();
   const accessPoints = usePolling(
     () => api.accessPoints(`?ssid_exact=${encodeURIComponent(ssid)}`),
@@ -37,7 +40,7 @@ export function SSIDGroupPage() {
     [ssid],
     { paused: printing },
   );
-  const coverage = usePolling(() => api.accessPointsCoverage({ ssidExact: ssid }), 30000, [ssid], {
+  const coverage = usePolling(() => api.accessPointsCoverage({ ssidExact: ssid, estimator }), 30000, [ssid, estimator], {
     paused: printing,
   });
 
@@ -94,8 +97,12 @@ export function SSIDGroupPage() {
       // table's color dots) while the fill carries the signal-strength
       // info, same split as everywhere else on this page.
       devices.forEach((ap, index) => {
-        const apEstimatedLocation =
-          ap.points.length > 0 ? weightedCentroid(ap.points.map((p) => ({ lat: p.lat, lng: p.lng, weight: p.weight }))) : null;
+        // Server-computed under the user's chosen estimator (see
+        // estimatorPreference.ts) rather than a local centroid, so this dot
+        // means the same thing here as everywhere else in the app.
+        const apEstimatedLocation = ap.estimated_position
+          ? { lat: ap.estimated_position.lat, lng: ap.estimated_position.lng }
+          : null;
         soloShapes(ap.points.filter(isPointVisible), apEstimatedLocation, "wifi").forEach((shape) => {
           polys.push({
             points: shape.polygon,

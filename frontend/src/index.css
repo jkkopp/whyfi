@@ -197,9 +197,31 @@ h2 {
 /* Coverage polygons are an estimate of a fading radio field, not a surveyed
    boundary — the outline is already corner-smoothed (see smoothPolygon in
    geo.ts), and this feathers it further so nothing reads as a hard edge.
-   Applied via Leaflet's `className` path option in RadioMap. */
+   Applied via Leaflet's `className` path option in RadioMap.
+
+   Map geometry only. It is NOT a "de-emphasise this text" class: it was once
+   used for the secondary labels on the floor-plan page, which literally
+   blurred the SSID beside each BSSID — exactly the identifying detail you
+   need when a radio has no name of its own. Use .meta-note for that. */
 .coverage-soft {
   filter: blur(4px);
+}
+
+/* Secondary detail sitting inline beside a primary label — reading counts,
+   the SSID next to a BSSID, band lists. Dimmed and slightly smaller so the
+   primary label still leads, but fully legible: this is the context that
+   makes an anonymous-looking identifier recognisable. */
+.meta-note {
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  font-weight: 400;
+}
+
+/* An entry that's already been dealt with (a radio you've placed on the
+   plan). Dimmed via opacity so it recedes without becoming unreadable —
+   you still need to be able to find it in the list to move or remove it. */
+.is-placed {
+  opacity: 0.62;
 }
 
 .error-text {
@@ -1135,5 +1157,395 @@ button:disabled {
     padding: 0.4rem 0.6rem;
     border-radius: 4px;
     break-inside: avoid;
+  }
+}
+
+/* --- Control rows and multi-step workflows -------------------------------
+   Added when three new pages (Localization, Floor plans, the calibration
+   panel) turned out to be referencing class names that were never defined —
+   so they rendered as an undifferentiated stack of raw form controls. */
+
+/* A horizontal group of related controls. Wraps rather than scrolling, since
+   these sit above content rather than inside a fixed-height bar. */
+.control-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+/* Each control keeps its label attached to its input, so a wrapped row stays
+   readable instead of orphaning labels onto their own line. */
+.control-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.control-row select,
+.control-row input[type="text"],
+.control-row input[type="url"],
+.control-row input[type="number"],
+.control-row input[type="file"] {
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 0.85rem;
+  max-width: 100%;
+}
+
+.control-row button {
+  padding: 0.4rem 0.8rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.control-row button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.control-row button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.control-row button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Title beside a page-level action (e.g. Print report). */
+.page-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+/* One stage of a guided workflow. Numbered, boxed and dimmed when it isn't
+   the stage you're on — the floor-plan survey is four ordered steps, and
+   presenting them as one flat row of inputs gave no sense of order at all. */
+.workflow-step {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  margin: 0.75rem 0;
+  background: var(--bg-elevated);
+}
+
+.workflow-step.is-active {
+  border-color: var(--accent);
+}
+
+.workflow-step.is-done {
+  opacity: 0.72;
+}
+
+/* View controls that sit directly above the plan image and change what it
+   shows rather than what it contains. Sticky alongside the plan itself so the
+   threshold stays reachable while you're looking at the dots it recolours. */
+.floorplan-view-controls {
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  margin-top: 0.75rem;
+}
+
+.floorplan-view-controls output {
+  min-width: 5rem;
+  text-align: right;
+}
+
+/* "You are armed — the next click on the plan does this." Loud enough to be
+   read before clicking, since the alternative is a click that lands on the
+   wrong step and reports a confusing error. */
+.step-armed {
+  color: var(--accent);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+/* A finished step's badge shows a tick instead of its number. The step was
+   previously only dimmed, which reads as "disabled" at least as readily as
+   "done" — the opposite meaning. */
+.workflow-step.is-done .step-number {
+  font-size: 0;
+}
+
+.workflow-step.is-done .step-number::after {
+  content: "✓";
+  font-size: 0.85rem;
+}
+
+.workflow-step > h3 {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* The step number badge. */
+.workflow-step > h3 .step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  background: var(--border);
+  color: var(--text);
+  font-size: 0.8rem;
+  flex: 0 0 auto;
+}
+
+.workflow-step.is-active > h3 .step-number {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.workflow-step > p {
+  margin: 0.25rem 0 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+/* The floor plan image plus its measurement-point overlay. */
+.floorplan-canvas {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.floorplan-canvas img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.floorplan-canvas.is-clickable img {
+  cursor: crosshair;
+}
+
+/* Absolutely positioned by percentage, so points stay put at any display
+   size — the image is scaled to fit and the overlay must scale with it. */
+.floorplan-point {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  margin-left: -8px;
+  margin-top: -8px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-sizing: border-box;
+  pointer-events: auto;
+}
+
+.floorplan-point.is-weak {
+  border: 3px solid #ef4444;
+}
+
+.floorplan-point.is-unmeasured {
+  background: #64748b;
+}
+
+/* File-picker label on Manage scans — keeps "Import scans" and its hidden-ish
+   file input reading as one control rather than two stray elements. */
+.import-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+/* Interpolated coverage cell. Sits under the measured dots and is only ever
+   rendered where the backend produced a value — an unpainted area means "not
+   measured", which is more honest than extrapolating a guess across rooms
+   nobody walked through. */
+.floorplan-heat-cell {
+  position: absolute;
+  opacity: 0.42;
+  pointer-events: none;
+}
+
+/* A surveyed access-point location. Square and outlined so it reads as a
+   different kind of thing from the round measurement spots — one is where a
+   transmitter is, the other is where you stood. */
+.floorplan-ap {
+  position: absolute;
+  width: 15px;
+  height: 15px;
+  margin-left: -7px;
+  margin-top: -7px;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+  box-sizing: border-box;
+  transform: rotate(45deg);
+}
+
+/* A pin currently open in the refinement panel. */
+.floorplan-point.is-selected,
+.floorplan-ap.is-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.floorplan-point,
+.floorplan-ap {
+  cursor: pointer;
+}
+
+/* A marker you can pick up and move.
+   touch-action: none is what makes this work with a finger at all: without
+   it the browser claims the gesture for panning/scrolling the page and the
+   pointermove events stop arriving mid-drag, so the pin sticks after a few
+   pixels. A floor-plan survey is done on a phone, walking around the house,
+   so the touch path is the one that actually matters here. */
+.floorplan-point.is-draggable,
+.floorplan-ap.is-draggable {
+  cursor: grab;
+  touch-action: none;
+}
+
+.floorplan-point.is-draggable:active,
+.floorplan-ap.is-draggable:active {
+  cursor: grabbing;
+}
+
+/* Enlarge the touch target well past the 15px visual marker without
+   changing how big the dot looks — a fingertip is ~9mm and the dot is
+   ~4mm, so grabbing one accurately is otherwise luck. */
+.floorplan-point.is-draggable::before,
+.floorplan-ap.is-draggable::before {
+  content: "";
+  position: absolute;
+  inset: -9px;
+}
+
+/* The traced building footprint, drawn over the plan raster.
+   preserveAspectRatio="none" on the SVG lets its viewBox track the image's
+   own pixel space, so vertices stay put at any rendered size — the same
+   percentage-based positioning the pins use, expressed as geometry. */
+.floorplan-outline {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.floorplan-outline polygon {
+  fill: none;
+  stroke: #f59e0b;
+  stroke-width: 2;
+  /* The stroke is in viewBox units, which are stretched by
+     preserveAspectRatio="none"; this keeps it an even width on screen
+     regardless of how the plan is scaled. */
+  vector-effect: non-scaling-stroke;
+}
+
+/* Mid-trace: dashed, and with a wash of fill so the enclosed area reads as
+   an area rather than a stray path. */
+.floorplan-outline polygon.is-tracing {
+  stroke-dasharray: 6 4;
+  fill: rgba(245, 158, 11, 0.12);
+}
+
+/* A draggable corner of the trace. Bigger than a measurement dot because
+   it's a manipulation handle rather than a data point. */
+.floorplan-vertex {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
+  margin-top: -7px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 3px solid #f59e0b;
+  box-sizing: border-box;
+  cursor: grab;
+  touch-action: none;
+}
+
+.floorplan-vertex:active {
+  cursor: grabbing;
+}
+
+.floorplan-vertex::before {
+  content: "";
+  position: absolute;
+  inset: -9px;
+}
+
+/* Tracing retargets what a click on the plan means, so the cursor says so. */
+.floorplan-canvas.is-tracing img {
+  cursor: crosshair;
+}
+
+/* A suggested access-point position. Numbered and dashed to read as a
+   proposal rather than a surveyed fact — it's advice from a heuristic, not
+   somewhere an access point actually is. */
+.floorplan-suggestion {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  margin-left: -13px;
+  margin-top: -13px;
+  border-radius: 50%;
+  border: 2px dashed var(--accent);
+  background: rgba(0, 0, 0, 0.45);
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  pointer-events: auto;
+}
+
+/* A slider paired with its numeric readout. The number alone is precise but
+   awkward to explore with; the slider alone can't be typed into. */
+.slider-field {
+  flex: 1 1 20rem;
+  min-width: 14rem;
+}
+
+.slider-field input[type="range"] {
+  flex: 1;
+  min-width: 6rem;
+}
+
+.slider-field input[type="number"] {
+  width: 5.5rem;
+}
+
+/* The plan stays on screen while you work down the steps beside it. Without
+   this, ticking a radio in step 4 scrolls the plan out of view and the thing
+   you're placing onto is gone. */
+@media (min-width: 900px) {
+  .floorplan-canvas.is-sticky {
+    position: sticky;
+    top: 0.5rem;
+    z-index: 1;
   }
 }

@@ -356,6 +356,19 @@ export interface CappedList<T> {
   observation_limit: number;
 }
 
+/** Where the backend estimated this device actually is, under the estimator
+ * the caller asked for. `available: false` means that estimator couldn't run
+ * for this device (no FTM readings, or a radio type with no signal model) and
+ * `fell_back_to` names what produced the coordinates instead — so the UI can
+ * say which algorithm a dot really came from. */
+export interface EstimatedPosition {
+  lat: number;
+  lng: number;
+  estimator: string;
+  available: boolean;
+  fell_back_to?: string | null;
+}
+
 export interface AccessPointCoverage {
   bssid: string;
   ssid: string;
@@ -374,6 +387,7 @@ export interface AccessPointCoverage {
     // timeline across every active device on the combined Heatmap page.
     observed_at?: string;
   }[];
+  estimated_position?: EstimatedPosition | null;
 }
 
 // Shared shape for the cellular/BLE coverage endpoints — unlike WiFi's
@@ -400,4 +414,338 @@ export interface RadioCoverage {
     // timeline across every active device on the combined Heatmap page.
     observed_at?: string;
   }[];
+  estimated_position?: EstimatedPosition | null;
+}
+
+// --- AP localization (ap-localization-design.md V4-V8) ---------------------
+
+/** 95% confidence ellipse around a solved AP position. Null when there
+ * aren't enough readings left over to estimate spread from (see
+ * position_covariance in backend/scans/localization.py) — an honest "can't
+ * say", not a zero-size ellipse. */
+export interface PositionUncertainty {
+  semi_major_m: number;
+  semi_minor_m: number;
+  /** Compass bearing of the semi-major axis, 0-180. */
+  orientation_deg: number;
+  confidence: number;
+  rms_uncertainty_m: number;
+}
+
+/** One suggested next measurement spot, from the V6 geometric heuristic. */
+export interface NextMeasurement {
+  lat: number;
+  lng: number;
+  bearing_deg: number;
+  distance_m: number;
+  gap_deg: number;
+  rationale: string;
+}
+
+/** AP *position* probability surface — distinct from the RSSI coverage
+ * heatmap, which answers a different question (see HeatmapPage). Values are
+ * peak-normalized relative likelihood, not absolute probability mass. */
+export interface ProbabilityGrid {
+  span_m: number;
+  steps: number;
+  cells: { lat: number; lng: number; relative_likelihood: number }[];
+}
+
+export interface FtmPosition {
+  bssid: string;
+  ssid?: string;
+  available: boolean;
+  sample_count: number;
+  /** Only present when `available` — the solver needs 2+ distinct spots. */
+  distinct_position_count?: number;
+  reason?: string;
+  lat?: number;
+  lng?: number;
+  rms_residual_m?: number;
+  iterations?: number;
+  uncertainty?: PositionUncertainty | null;
+  probability_grid?: ProbabilityGrid | null;
+  next_measurements?: NextMeasurement[];
+  observations?: {
+    scan_session_id: string;
+    lat: number;
+    lng: number;
+    distance_m: number;
+    weight: number;
+  }[];
+}
+
+/** A group of BSSIDs that may be radios of one physical access point.
+ * Deliberately a hypothesis with evidence and a confidence, never a hard
+ * claim — see cluster_ap_hypotheses in backend/scans/localization.py. */
+export interface MeshHypothesis {
+  hypothesis_id: number;
+  lat: number;
+  lng: number;
+  radio_count: number;
+  confidence: number;
+  is_multi_radio: boolean;
+  evidence: string[];
+  ssids: string[];
+  bssids: string[];
+}
+
+/** One reading's agreement with the fitted position. `kind` distinguishes a
+ * true fit residual (multilateration estimators, which predict a distance)
+ * from plain distance-to-estimate (centroid/strongest, which have no distance
+ * model) — the two are not comparable and must not be shown as if they were. */
+export interface PositionResidual {
+  lat: number;
+  lng: number;
+  weight: number;
+  observed_at?: string | null;
+  scan_session_id?: string | null;
+  distance_to_estimate_m: number;
+  measured_distance_m?: number;
+  residual_m: number | null;
+  kind: "fit_residual" | "distance_only";
+}
+
+export interface DevicePosition {
+  identifier: string;
+  radio_kind: string;
+  ssid?: string;
+  label?: string;
+  estimator: string;
+  available: boolean;
+  reason?: string;
+  fell_back_to?: string | null;
+  lat: number | null;
+  lng: number | null;
+  sample_count: number;
+  /** Readings dropped as geographic outliers before estimating — see
+   * reject_outlying_readings. Non-zero means one identifier was recorded in
+   * places too far apart to be the same transmitter. */
+  discarded_outliers?: number;
+  /** Distance from the operator-pinned true position, when one exists — the
+   * number that says which estimator is actually right rather than merely
+   * different. */
+  error_m?: number | null;
+  rms_residual_m?: number;
+  residuals: PositionResidual[];
+}
+
+/** `?compare=1` — every estimator's answer for one device, plus how far apart
+ * they land. The disagreement is the product: two estimators 3m apart means
+ * the position is well determined; 200m apart means at least one is being
+ * fooled. */
+export interface PositionComparison {
+  identifier: string;
+  radio_kind: string;
+  estimates: Record<string, DevicePosition>;
+  disagreements: { a: string; b: string; distance_m: number }[];
+  labels: Record<string, string>;
+}
+
+// --- Ground truth, benchmarking and calibration ---------------------------
+
+/** An operator-asserted true position. `AP` pins where an access point really
+ * is (used to score estimators and fit the path-loss model); `OBSERVER` pins
+ * where the phone really was for one scan session, correcting a bad GPS fix.
+ * Overlays the recorded data — never rewrites it. */
+export interface GroundTruthPosition {
+  id: number;
+  kind: "AP" | "OBSERVER";
+  target_key: string;
+  latitude: number;
+  longitude: number;
+  label: string;
+  note: string;
+  /** Set when the pin was placed on a floor plan; latitude/longitude are
+   * derived from these. Kept so the plan can redraw the pin where it was
+   * clicked without inverting the transform. */
+  floor_plan: number | null;
+  image_x: number | null;
+  image_y: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BenchmarkRow {
+  bssid: string;
+  ssid: string;
+  label: string;
+  sample_count: number;
+  errors: Record<string, number | null>;
+}
+
+export interface BenchmarkSummaryEntry {
+  mean_error_m: number;
+  median_error_m: number;
+  best_error_m: number;
+  worst_error_m: number;
+  scored_aps: number;
+}
+
+export interface LocalizationBenchmark {
+  pinned_ap_count: number;
+  scored_ap_count: number;
+  results: BenchmarkRow[];
+  summary: Record<string, BenchmarkSummaryEntry | null>;
+  range_model_is_calibrated: boolean;
+}
+
+export interface FittedRangeModel {
+  id: number;
+  radio_kind: string;
+  ref_rssi_at_1m: number;
+  path_loss_exponent: number;
+  r_squared: number;
+  sample_count: number;
+  min_distance_m: number;
+  max_distance_m: number;
+  is_active: boolean;
+  fitted_at: string;
+}
+
+export interface CalibrationState {
+  generic: Record<string, { ref_rssi_at_1m: number; path_loss_exponent: number }>;
+  fitted: FittedRangeModel[];
+}
+
+export interface CalibrationFit {
+  available: boolean;
+  reason?: string;
+  ref_rssi_at_1m?: number;
+  path_loss_exponent?: number;
+  plausible?: boolean;
+  r_squared?: number;
+  sample_count?: number;
+  min_distance_m?: number;
+  max_distance_m?: number;
+}
+
+export interface ExportBundle {
+  sessions: unknown[];
+  session_count: number;
+  truncated: boolean;
+  session_limit: number;
+  exported_at: string;
+}
+
+export interface ImportResult {
+  created: number;
+  skipped: number;
+  failed: { client_scan_id?: string; errors: unknown }[];
+  failed_count: number;
+}
+
+
+// --- Floor-plan surveying -------------------------------------------------
+
+/** An uploaded floor plan. `is_calibrated` means both anchor pairs are set,
+ * which is what makes a click on the image mean a real position. */
+export interface FloorPlan {
+  id: number;
+  name: string;
+  image: string;
+  image_width_px: number;
+  image_height_px: number;
+  anchor1_image_x: number | null;
+  anchor1_image_y: number | null;
+  anchor1_lat: number | null;
+  anchor1_lng: number | null;
+  anchor2_image_x: number | null;
+  anchor2_image_y: number | null;
+  anchor2_lat: number | null;
+  anchor2_lng: number | null;
+  /** The transform itself. Derived from the anchors on calibration, then
+   * directly adjustable — two clicks on a map at house scale aren't precise
+   * enough to get rotation right first time. */
+  meters_per_pixel: number | null;
+  /** Compass bearing of the plan's "up" direction; 0 = top points north. */
+  bearing_deg: number | null;
+  is_calibrated: boolean;
+  placement_count: number;
+  /** The building's footprint traced on the plan, as image-pixel vertices.
+   * Empty means untraced, and everything falls back to the image rectangle.
+   *
+   * The image itself stays rectangular — this is not a crop. It's what the
+   * building occupies *inside* that rectangle, which is what lets the map
+   * footprint match an L-shaped house and keeps the interpolated heatmap off
+   * the pixels that are garden. */
+  outline_points: { x: number; y: number }[];
+  /** Footprint in real coordinates: the traced outline when there is one,
+   * otherwise the image's four corners clockwise from the top-left. Null
+   * until calibrated. Drawn on the map so the calibration can be judged
+   * against the building rather than by reading a bearing. */
+  corners: { lat: number; lng: number }[] | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Signal at each placed measurement point, in *pixel* coordinates so the
+ * plan image can be drawn on directly. `no_coverage` distinguishes "the
+ * network wasn't heard here at all" from "heard, but faint" — the former is
+ * the worse finding. */
+export interface FloorPlanCoveragePoint {
+  scan_session_id: string;
+  image_x: number;
+  image_y: number;
+  label: string;
+  rssi: number | null;
+  bssid: string | null;
+  ssid: string | null;
+  observed_at: string | null;
+  is_weak: boolean;
+  no_coverage: boolean;
+}
+
+/** Interpolated signal surface. A cell with `rssi: null` is beyond the
+ * influence of any measurement and must be left unpainted — colouring it
+ * would be claiming coverage that was never measured. */
+export interface FloorPlanHeatmapCell {
+  image_x: number;
+  image_y: number;
+  rssi: number | null;
+  distance_px: number;
+}
+
+export interface FloorPlanHeatmap {
+  cells: FloorPlanHeatmapCell[];
+  steps: number;
+  max_influence_px: number;
+}
+
+/** Where to move or add an access point to fix measured weak spots. A
+ * heuristic over weak-spot clusters, not an optimiser — `rationale` says why,
+ * and `action` distinguishes "move the one you have" from "you need another",
+ * which is a decision about power and cabling the backend shouldn't make. */
+export interface ApPlacementSuggestion {
+  rank: number;
+  action: "move" | "add";
+  image_x: number;
+  image_y: number;
+  weak_point_count: number;
+  dead_point_count: number;
+  worst_rssi: number | null;
+  nearest_ap_bssid: string | null;
+  nearest_ap_distance_m: number | null;
+  rationale: string;
+}
+
+export interface FloorPlanCoverage {
+  ssids: string[];
+  weak_threshold_dbm: number;
+  points: FloorPlanCoveragePoint[];
+  heatmap: FloorPlanHeatmap | null;
+  placed_aps: { bssid: string; image_x: number; image_y: number; label: string }[];
+  suggestions: ApPlacementSuggestion[];
+  weak_count: number;
+  measured_count: number;
+}
+
+/** A network actually audible at the plan's location, for the SSID picker. */
+export interface NearbySsid {
+  ssid: string;
+  reading_count: number;
+  best_rssi: number;
+  bssid_count: number;
+  bssids: string[];
+  bands: string[];
 }

@@ -12,8 +12,8 @@ import type { ReportField } from "../components/ReportHeader";
 import { SimpleLineChart } from "../components/SimpleLineChart";
 import { ALWAYS_MOBILE_BLE_TYPES, COVERAGE_STROKE_COLOR, classifyDeviceCoverage, soloShapes } from "../coverageConfig";
 import { useFilter } from "../context/FilterContext";
+import { getEstimatorPreference } from "../estimatorPreference";
 import { resolveCurrentScanMultiDevice } from "../currentScan";
-import { weightedCentroid } from "../geo";
 import { useReportPrinting, useReportViewSettings } from "../hooks/useDeviceReport";
 import { usePolling } from "../hooks/usePolling";
 import { formatCoords, osmLink } from "../reportLinks";
@@ -108,6 +108,9 @@ export function HeatmapPage() {
     ble: false,
   });
   const filter = useFilter();
+  // Read once per render rather than held in state: the setting only changes
+  // on the Settings page, which navigating back from remounts this anyway.
+  const estimator = getEstimatorPreference();
   // Held across the whole print interaction so a 20s poll can't swap the data
   // out between clicking Print and the dialog opening — the report has to be
   // the view that was on screen.
@@ -126,6 +129,7 @@ export function HeatmapPage() {
     until: filter.until,
     sessionLimit: filter.sessionLimit,
     area: filter.area,
+    estimator,
   };
 
   const { data, error, loading } = usePolling<CoverageData>(
@@ -225,8 +229,8 @@ export function HeatmapPage() {
           const isForcedMobile =
             source === "ble" && device.device_type_guess != null && ALWAYS_MOBILE_BLE_TYPES.has(device.device_type_guess);
           const apEstimatedLocation =
-            !isForcedMobile && device.points.length > 0
-              ? weightedCentroid(device.points.map((p) => ({ lat: p.lat, lng: p.lng, weight: p.weight })))
+            !isForcedMobile && device.estimated_position
+              ? { lat: device.estimated_position.lat, lng: device.estimated_position.lng }
               : null;
           soloShapes(readingsHere, apEstimatedLocation, source).forEach((shape) => {
             soloPolygons.push({
