@@ -209,7 +209,7 @@ export function FloorPlanPage() {
   function dismissCandidate(bssid: string) {
     const next = [...dismissed, bssid];
     setDismissed(next);
-    setApBssids((prev) => prev.filter((b) => b !== bssid));
+    clearApSelection(apBssids.filter((b) => b !== bssid));
     if (dismissKey) localStorage.setItem(dismissKey, JSON.stringify(next));
   }
 
@@ -243,6 +243,47 @@ export function FloorPlanPage() {
   function changeSsids(next: string[]) {
     setSsids(next);
     if (ssidKey) localStorage.setItem(ssidKey, JSON.stringify(next));
+  }
+
+  // Which radios are ticked for placement, remembered per plan for the same
+  // reason the networks are: identifying which two of a dozen BSSIDs are the
+  // box in your hallway is real work, and having to redo it after a reload —
+  // or after the phone locks mid-survey — is the kind of friction that stops
+  // a survey being finished. Cleared on a successful placement, which is
+  // deliberate and separate: that's the selection having been used up.
+  const apBssidKey = plan ? `whyfi-floorplan-ap-bssids-${plan.id}` : null;
+  useEffect(() => {
+    if (!apBssidKey) return;
+    try {
+      const saved = JSON.parse(localStorage.getItem(apBssidKey) ?? "[]");
+      const restored = Array.isArray(saved) ? saved.filter((b) => typeof b === "string") : [];
+      setApBssids(restored);
+      // Restoring a selection has to restore what it means, too — otherwise
+      // the radios come back ticked but the next click on the plan is still
+      // trying to place a measurement.
+      if (restored.length > 0) setMode("place-ap");
+    } catch {
+      setApBssids([]);
+    }
+  }, [apBssidKey]);
+
+  function changeApBssids(next: string[]) {
+    setApBssids(next);
+    setMode(next.length > 0 ? "place-ap" : "place");
+    if (apBssidKey) localStorage.setItem(apBssidKey, JSON.stringify(next));
+  }
+
+  /** Drops the selection without touching the mode.
+   *
+   * Every caller either just consumed the selection (placement succeeded) or
+   * is switching to a different kind of work and sets its own mode straight
+   * after — so this must not fight them for it. It still has to clear the
+   * stored copy: a selection that was used up, or deliberately abandoned,
+   * coming back ticked on the next load would be worse than not remembering
+   * it at all. */
+  function clearApSelection(next: string[] = []) {
+    setApBssids(next);
+    if (apBssidKey) localStorage.setItem(apBssidKey, JSON.stringify(next));
   }
 
 
@@ -393,7 +434,7 @@ export function FloorPlanPage() {
     setOutlineWorldDraft([]);
     setMode("outline");
     setSelectedPin(null);
-    setApBssids([]);
+    clearApSelection();
     setSessionId("");
     if (where === "map") setShowAlignment(true);
     setMessage(
@@ -532,7 +573,7 @@ export function FloorPlanPage() {
         const placed = apBssids.length;
         // Clear the selection afterwards, so the next click places the *next*
         // access point rather than silently dragging the one just placed.
-        setApBssids([]);
+        clearApSelection();
         setMessage(
           `Placed ${placed} radio${placed === 1 ? "" : "s"}. Tick the next access point's radios and click again.`,
         );
@@ -654,7 +695,32 @@ export function FloorPlanPage() {
   // and radios as a bare BSSID, so hiding a network hides its radios too
   // without needing a second store to keep in sync.
   const visibleSsids = nearbySsids.filter((n) => !dismissed.includes(`ssid:${n.ssid}`)).slice(0, 20);
-  const apCandidates = nearbyBssids.filter((b) => !dismissed.includes(b.bssid));
+  // Grouped by OUI — the first three octets of a MAC, which identify the
+  // manufacturer. Radios in one physical box share a vendor prefix and
+  // usually sit on adjacent addresses, so grouping puts the 2.4 and 5 GHz
+  // halves of the same router next to each other. That matters because
+  // placing an access point means ticking exactly those two and clicking
+  // once; scattered alphabetically among the neighbours' hardware, finding
+  // the pair is a hunt.
+  const apCandidates = useMemo(() => {
+    const visible = nearbyBssids.filter((b) => !dismissed.includes(b.bssid));
+    const groups = new Map<string, typeof visible>();
+    for (const candidate of visible) {
+      const oui = candidate.bssid.slice(0, 8).toLowerCase();
+      const group = groups.get(oui);
+      if (group) group.push(candidate);
+      else groups.set(oui, [candidate]);
+    }
+    return [...groups.entries()]
+      // Biggest groups first: a vendor with several radios here is far more
+      // likely to be your own kit than a one-off sighting of a neighbour's.
+      .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
+      .map(([oui, radios]) => ({
+        oui,
+        radios: [...radios].sort((a, b) => a.bssid.localeCompare(b.bssid)),
+      }));
+  }, [nearbyBssids, dismissed]);
+  const apCandidateCount = apCandidates.reduce((n, g) => n + g.radios.length, 0);
   const placedBssids = new Set(apOnPlan.map((p) => p.target_key));
   const placedSessionIds = new Set(placements.map((p) => p.target_key));
   const allSessions = sessions.data?.results ?? [];
@@ -692,7 +758,13 @@ export function FloorPlanPage() {
 
   const summary: ReportField[] = [
     { label: "Floor plan", value: plan?.name ?? "—" },
-    { label: "Networks surveyed", value: ssids.join(" + ") || "—" },
+    { label: "Networks surveyed", value: ssids.join(" + ") || "none selected" },
+    {
+      label: "Building outline",
+      value: plan?.outline_points?.length
+        ? `traced, ${plan.outline_points.length} corners`
+        : "untraced — the plan's full rectangle",
+    },
     { label: "Measurement points", value: coverage.data?.measured_count ?? placements.length },
     {
       label: "Weak spots",
@@ -732,9 +804,16 @@ export function FloorPlanPage() {
 
       <div className="page-title-row print-hide">
         <h1>Floor plan survey</h1>
-        {plan && coverage.data && <PrintReportButton label="Print survey report" />}
+        {/* Gated on having a plan, not on having coverage data. It used to
+            need coverage.data, which is only fetched once a network is
+            picked — so on a freshly calibrated plan the print button was
+            simply absent, which reads as "there is no printing feature"
+            rather than "print needs something to report on". A plan with its
+            calibration, its footprint and its placed points is a perfectly
+            reasonable thing to print. */}
+        {plan && <PrintReportButton label="Print survey report" />}
       </div>
-      <p className="page-hint">
+      <p className="page-hint floorplan-intro">
         Find weak spots at home. Upload a floor plan, anchor it to the world once, then walk through your scans and
         click where each one was taken. GPS can&rsquo;t tell rooms apart indoors, so placing points by hand is what
         makes the result trustworthy.
@@ -1060,16 +1139,22 @@ export function FloorPlanPage() {
             positions also feed the estimator scoreboard and path-loss calibration.
           </p>
 
-          {nearby.loading && apCandidates.length === 0 ? (
+          {nearby.loading && apCandidateCount === 0 ? (
             <p className="page-hint">Looking up which radios are audible here…</p>
-          ) : apCandidates.length === 0 ? (
+          ) : apCandidateCount === 0 ? (
             <p className="empty-state">
               No radios left to place.{" "}
               {dismissed.length > 0 && <button onClick={restoreCandidates}>Restore {dismissed.length} dismissed</button>}
             </p>
           ) : (
-            <div className="control-row">
-              {apCandidates.map((b) => (
+            apCandidates.map((group) => (
+              <div key={group.oui} className="oui-group">
+                <span className="oui-label mono" title="Vendor prefix (OUI) — radios in one box share it">
+                  {group.oui}
+                  {group.radios.length > 1 ? ` · ${group.radios.length} radios` : ""}
+                </span>
+                <div className="control-row">
+                  {group.radios.map((b) => (
                 <label key={b.bssid} className={placedBssids.has(b.bssid) ? "is-placed" : ""}>
                   <input
                     type="checkbox"
@@ -1078,7 +1163,7 @@ export function FloorPlanPage() {
                       const next = e.target.checked
                         ? [...apBssids, b.bssid]
                         : apBssids.filter((x) => x !== b.bssid);
-                      setApBssids(next);
+                      changeApBssids(next);
                       // Ticking a radio *is* the statement of intent. The
                       // click target on the plan used to depend on a separate
                       // mode button that read like an instruction ("Click the
@@ -1110,8 +1195,10 @@ export function FloorPlanPage() {
                     &times;
                   </button>
                 </label>
-              ))}
-            </div>
+                  ))}
+                </div>
+              </div>
+            ))
           )}
 
           <div className="control-row">
@@ -1126,7 +1213,8 @@ export function FloorPlanPage() {
                 : "Tick the radios that live in one box"}
             </span>
             <span className="page-hint" style={{ margin: 0 }}>
-              {apCandidates.length} radio{apCandidates.length === 1 ? "" : "s"} from your networks,{" "}
+              {apCandidateCount} radio{apCandidateCount === 1 ? "" : "s"} in {apCandidates.length} vendor
+              group{apCandidates.length === 1 ? "" : "s"},{" "}
               {apOnPlan.length} placed
             </span>
           </div>
@@ -1159,7 +1247,7 @@ export function FloorPlanPage() {
                   // scan means the next click on the plan is a measurement.
                   if (e.target.value) {
                     setMode("place");
-                    setApBssids([]);
+                    clearApSelection();
                   }
                 }}
                 disabled={unplacedSessions.length === 0 && placedSessions.length === 0}
@@ -1643,7 +1731,7 @@ export function FloorPlanPage() {
               <tr>
                 <th>BSSID</th>
                 <th>Position on plan</th>
-                <th />
+                <th className="print-hide" />
               </tr>
             </thead>
             <tbody>
@@ -1653,7 +1741,9 @@ export function FloorPlanPage() {
                   <td>
                     {Math.round(ap.image_x as number)}, {Math.round(ap.image_y as number)} px
                   </td>
-                  <td>
+                  {/* Actions are for the screen; on paper they're two dead
+                      buttons in a column of the report. */}
+                  <td className="print-hide">
                     <button onClick={() => setSelectedPin(ap)}>Edit</button>{" "}
                     <button onClick={() => removePin(ap)}>Remove</button>
                   </td>

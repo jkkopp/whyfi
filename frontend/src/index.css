@@ -1158,6 +1158,74 @@ button:disabled {
     border-radius: 4px;
     break-inside: avoid;
   }
+
+  /* Browsers drop background colours when printing by default, to save ink
+     on page furniture. Here the background colour IS the data: every heat
+     cell, every predicted cell and every signal-coloured dot carries its
+     dBm as its fill, so without this the floor plan prints as a bare
+     drawing with a few grey specks — a survey report with the survey
+     removed. Scoped to the plan's own layers rather than applied globally,
+     so ordinary page chrome still prints white. */
+  .floorplan-canvas,
+  .floorplan-heat-cell,
+  .floorplan-point,
+  .floorplan-ap,
+  .floorplan-suggestion {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Sticky positioning has no meaning on paper and, worse, can pin the plan
+     to one spot while the rest of the document flows past it.
+     `relative`, emphatically NOT `static`: every heat cell, dot, marker and
+     outline on the plan is absolutely positioned against this element. Take
+     away its positioning and they resolve against the page instead, and the
+     entire coverage surface detaches and rains down the document over the
+     top of the text. Killing the stickiness must not also destroy the
+     containing block. */
+  .floorplan-canvas.is-sticky {
+    position: relative;
+  }
+
+  /* The plan and its overlays are one figure — splitting it across a page
+     break would cut the survey in half. */
+  .floorplan-canvas {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    max-width: 100%;
+  }
+
+  /* Mid-edit state that shouldn't reach paper: a half-drawn outline's
+     handles, and controls that only make sense when they can be clicked. */
+  .floorplan-vertex,
+  .floorplan-view-controls,
+  .oui-group {
+    display: none !important;
+  }
+
+  /* The five numbered steps are the *tool* for building a survey — upload
+     buttons, calibration sliders, network checkboxes, scan pickers. None of
+     it is the survey. Printing them produced a report where the findings
+     (the plan, the coverage, the tables) were buried under three pages of
+     dead form controls. What the reader needs is on the ReportHeader above
+     and in the plan and tables below; the settings that produced it are
+     summarised there too, which is the part that actually belongs on paper.
+     The page's own instructional intro goes for the same reason: "upload a
+     floor plan, anchor it to the world" is guidance for someone at a
+     keyboard, not for someone holding a printout. */
+  .workflow-step,
+  .floorplan-intro {
+    display: none !important;
+  }
+
+  /* Predicted coverage must stay distinguishable from measured coverage in
+     print, where the reader can't hover for a tooltip and colour may be
+     rendered in greyscale. The hatching is what carries that distinction,
+     so it has to survive alongside the fill. */
+  .floorplan-heat-cell.is-predicted {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
 }
 
 /* --- Control rows and multi-step workflows -------------------------------
@@ -1458,6 +1526,29 @@ button:disabled {
   inset: -9px;
 }
 
+/* Radios sharing a vendor prefix (OUI), boxed together. The 2.4 and 5 GHz
+   halves of one router share a prefix and usually sit on adjacent
+   addresses, so this puts the pair you need to tick side by side instead of
+   scattered among the neighbours' hardware. */
+.oui-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.35rem 0.6rem 0.1rem;
+  margin: 0.5rem 0;
+  background: var(--bg-elevated);
+}
+
+.oui-label {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.oui-group .control-row {
+  margin: 0.25rem 0 0.4rem;
+}
+
 /* The traced building footprint, drawn over the plan raster.
    preserveAspectRatio="none" on the SVG lets its viewBox track the image's
    own pixel space, so vertices stay put at any rendered size — the same
@@ -1560,7 +1651,12 @@ button:disabled {
 /* The plan stays on screen while you work down the steps beside it. Without
    this, ticking a radio in step 4 scrolls the plan out of view and the thing
    you're placing onto is gone. */
-@media (min-width: 900px) {
+/* `screen and`, not a bare min-width. This block sits after the @media print
+   rules, so on a wide page it out-ordered the print override that resets
+   position to static and the plan stayed sticky while printing — which pins
+   it to one spot as the rest of the document flows past. Sticky is a
+   screen-only idea; saying so is better than fighting source order. */
+@media screen and (min-width: 900px) {
   .floorplan-canvas.is-sticky {
     position: sticky;
     top: 0.5rem;
