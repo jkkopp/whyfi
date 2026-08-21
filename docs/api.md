@@ -58,6 +58,10 @@ exercised against a real browser session — see `MEMORY.md`.
     {"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "MyNetwork", "rssi": -55,
      "frequency_mhz": 2437, "capabilities": "[WPA2-PSK-CCMP][ESS]"}
   ],
+  "ftm_observations": [
+    {"bssid": "aa:bb:cc:dd:ee:ff", "success": true, "distance_mm": 4231,
+     "distance_std_dev_mm": 120, "rssi": -52, "status": "success"}
+  ],
   "cell_observations": [
     {"mcc": "262", "mnc": "01", "radio_type": "LTE", "is_serving_cell": true,
      "signal_dbm": -85, "rsrp": -95, "rsrq": -10, "sinr": 12}
@@ -80,6 +84,16 @@ exercised against a real browser session — see `MEMORY.md`.
 Every `*_observations` array is optional/independently empty. Idempotent on
 `client_scan_id` — replaying the same payload returns the existing session
 (200) instead of duplicating rows.
+
+`ftm_observations` are Wi-Fi RTT/FTM **distance** measurements, not RSSI
+readings — a separate table from `wifi_observations` because they're a
+different kind of raw measurement (a metric distance plus its quality), and
+observations stay immutable per measurement type so estimators can be re-run
+against the originals. They arrive in their own session from the Android
+app's manual "Range" action rather than as part of a regular scan pass, and
+are what `/access-points/{bssid}/ftm-position/` solves against. A failed
+ranging attempt is still recorded (`"success": false`) — knowing an AP
+refused to range is a real result, not an absence of one.
 
 Also **atomic** (`@transaction.atomic` on the ingest serializer's `create`),
 and that isn't optional given the idempotency above: a session committed with
@@ -104,6 +118,18 @@ all. Values are `OPEN`, `WEP`, `WPA`, `WPA2`, `WPA3`, `WPA2_WPA3`, `OWE`
 - `GET /lan-observations/?since=`
 - `GET /heatmap/?source=wifi|cellular|ble&bounds=<sw_lat>,<sw_lng>,<ne_lat>,<ne_lng>&since=` — grid-bucketed points; **capped envelope**, see below
 - `GET /access-points/coverage/?ssid_exact=&since=`, `GET /cell-towers/coverage/?since=`, `GET /ble-observations/coverage/?since=` — per-AP/tower/device list of distinct observed locations with a weight (mean RSSI/dBm from that spot), which is what the map's coverage shapes are built from. **Capped envelope**, see below
+- `GET /access-points/{bssid}/position/?estimator=&compare=1`, and the same action on `/cell-towers/{tower_key}/` and `/ble-devices/{device_key}/` — one device's estimated position under a chosen estimator (`centroid`, `strongest`, `rssi_multilateration`, `ftm_multilateration`; unknown values fall back to the default rather than erroring). `compare=1` returns every estimator side by side plus their pairwise disagreement in metres, which is the point: close agreement means the position is well determined, a wide spread means at least one algorithm is being misled. Each estimate carries `residuals` — per reading, worst first — distinguishing a true fit residual (multilateration, which predicts a distance) from plain distance-to-estimate (centroid/strongest, which have no distance model). An estimator that can't run for a device returns `available: false` with a `reason` and `fell_back_to`, never a different algorithm's answer under the requested name. **Honours the standard `since`/`until`/`session_limit` window** — see `scans/estimators.py`
+- The three `coverage` endpoints also accept `?estimator=` and return `estimated_position` per device, so the Heatmap/SSID-group pages get one estimate per device in a single request rather than one round trip each
+- `GET /access-points/{bssid}/ftm-position/?include_grid=1&grid_steps=25&grid_span_m=120` — estimated **physical position** of one AP, solved from its Wi-Fi RTT/FTM ranging samples by weighted least squares (see `scans/localization.py`). Returns `{"available": false, "reason": ..., "sample_count": N}` when there aren't at least 3 successful readings from 2+ distinct observer positions — 2 unknowns can't be solved from less, and a confident-looking answer from insufficient data would be worse than none. When available, carries `lat`/`lng`, a 95% confidence ellipse (`uncertainty`, null when there's no degree of freedom left to estimate spread from), suggested `next_measurements`, and — only with `include_grid=1` — a `probability_grid` of peak-normalized relative likelihood. **This grid is the AP *position* heatmap and is not the RSSI coverage heatmap**; they answer different questions and the design deliberately keeps them apart
+- `GET /ground-truth/`, `POST /ground-truth/`, `DELETE /ground-truth/{id}/` — operator-asserted true positions. `kind=AP` pins where an access point really is (scores estimators, feeds calibration); `kind=OBSERVER` pins where the phone really was for one scan session, correcting a bad GPS fix. POST upserts on `(kind, target_key)` — re-pinning is a correction, not an error. These **overlay** recorded data and never rewrite it; pass `?use_ground_truth=0` to any position/coverage endpoint to see the uncorrected answer
+- `GET /floor-plans/`, `POST /floor-plans/` (multipart: `name`, `image`, `image_width_px`, `image_height_px`), `POST /floor-plans/{id}/calibrate/` — uploaded floor plans for indoor surveying. `image` is a `FileField` (Pillow isn't a dependency, and nothing server-side decodes the file — the browser sends the pixel dimensions). Calibration takes two matched anchor pairs, plan pixels ↔ real lat/lng, which fixes scale and rotation together; coincident anchors are rejected. Plans are served through the same login-gated `/media/` view as APKs
+- `POST /ground-truth/` accepts `floor_plan` + `image_x`/`image_y` in place of `latitude`/`longitude` — the real position is derived server-side (`scans/floorplan.image_to_world`), so there's one implementation of the transform and the pin still feeds every estimator normally. Pixel coordinates are stored alongside so the plan can redraw the pin without inverting the transform
+- `GET /floor-plans/{id}/coverage/?ssid_exact=&weak_threshold_dbm=` — the weak-spot view. Per placed measurement point, the **best** RSSI across all of that SSID's BSSIDs (a mesh hands you between radios; what you feel in a room is whichever is strongest), returned in pixel coordinates. `no_coverage` distinguishes "not heard here at all" from "heard, but faint" — the former is the worse finding
+- `GET /localization/benchmark/` — every pinned access point scored under every estimator, with mean/median/best/worst error each. The only endpoint that says which estimator is *right* rather than merely different
+- `GET /calibration/`, `POST /calibration/` — the generic path-loss constants alongside any fitted to your own measurements. POST re-fits from current ground truth (ordinary least squares on `rssi` vs `log10(distance)` — see `scans/calibration.py`) and reports `r_squared`, sample count and the distance range fitted over. Fitting never activates by itself: `POST /calibration/activate/` is separate, because a fitted model changes what every RSSI-derived distance means
+- `GET /scan-sessions/export/?since=&until=&ssid_exact=&limit=` — every matching session and its observations **in the ingest schema**, so the file is a restore point rather than a report. `truncated` means the cap was hit and the file is *not* a complete backup
+- `POST /scan-sessions/import_sessions/` — replays an exported bundle through the normal ingest serializer. Idempotent: sessions already present are skipped, so importing the same file twice changes nothing. Sensors are matched by exported name (created if absent) so provenance survives the round trip
+- `GET /access-points/mesh-groups/?ssid_exact=&since=&radius_m=15` — BSSIDs grouped into probable physical access points (a BSSID is a radio, not a box). Each group carries a `confidence` and the `evidence` behind it (position agreement, vendor OUI, consecutive MACs, distinct bands) rather than asserting a verdict. Position alone never merges two BSSIDs — readings taken from one spot give every AP in earshot the same centroid, so corroborating identity evidence is required. **Capped envelope**, see below
 - `GET /app/latest/` — latest **successful** Android release metadata + download URL (session **or** sensor token); 404 while a build is in progress or none has ever succeeded. `download_url` is absolute and carries a signed, path-scoped, 30-minute `?t=` token so it's fetchable from a phone with no session
 - `GET /sensors/` — list, **never includes the token** (see write endpoints below for the one time it's shown).
   Each sensor carries a nested `scan_policy` object: the desired scanning state, whatever the device last
