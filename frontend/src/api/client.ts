@@ -385,10 +385,15 @@ export const api = {
   resetFloorPlanCalibration: (id: number) => post<FloorPlan>(`/floor-plans/${id}/reset-calibration/`),
   adjustFloorPlan: (id: number, patch: { bearing_deg?: number; meters_per_pixel?: number }) =>
     post<FloorPlan>(`/floor-plans/${id}/adjust/`, patch),
-  /** Stores the traced building footprint in image pixels. An empty array
-   * clears it, reverting to the image's own rectangle. */
-  saveFloorPlanOutline: (id: number, points: { x: number; y: number }[]) =>
-    post<FloorPlan>(`/floor-plans/${id}/outline/`, { points }),
+  /** Stores the traced building footprint. Points are either image pixels
+   * ({x, y}, traced on the plan drawing) or real coordinates ({lat, lng},
+   * traced on the map) — the backend converts the latter, so the transform
+   * has one implementation and the stored form is always pixels. An empty
+   * array clears it, reverting to the image's own rectangle. */
+  saveFloorPlanOutline: (
+    id: number,
+    points: { x: number; y: number }[] | { lat: number; lng: number }[],
+  ) => post<FloorPlan>(`/floor-plans/${id}/outline/`, { points }),
   floorPlanNearbySsids: (id: number, radiusM = 150) =>
     get<{ radius_m: number; results: NearbySsid[] }>(`/floor-plans/${id}/nearby-ssids/?radius_m=${radiusM}`),
   floorPlanCoverage: (

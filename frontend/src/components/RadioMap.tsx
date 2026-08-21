@@ -21,6 +21,14 @@ const DEFAULT_CENTER: [number, number] = [48.1351, 11.582];
 // fixed, visible base size instead of literally to-scale.
 const GRID_CELL_METERS = 8;
 
+// How far auto-fit is allowed to zoom in. Only binds when the data is small
+// enough that fitting it would otherwise go closer — a tour across a county
+// picks its own low zoom regardless. It used to be 17, which is street level:
+// fitting a single building's footprint (the floor-plan alignment map) left
+// the house as a speck in the middle with no way to judge whether the plan
+// lined up with it, which is the entire purpose of that view.
+const FIT_MAX_ZOOM = 20;
+
 export interface CoveragePolygon {
   points: { lat: number; lng: number }[];
   color: string;
@@ -381,7 +389,16 @@ export function RadioMap({
     const map = L.map(containerRef.current).setView(initialCenterRef.current ?? DEFAULT_CENTER, 17);
     tileLayerRef.current = L.tileLayer(TILE_URL, {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      maxZoom: 19,
+      // OSM has no tiles past z19, but z19 is not close enough to line a
+      // floor plan up against a roof — a house is a couple of centimetres
+      // across at that zoom, and anchoring it means clicking a specific
+      // corner of a specific building. maxNativeZoom stops Leaflet asking
+      // for tiles that don't exist; maxZoom lets it keep zooming by scaling
+      // the z19 tile up. The basemap goes soft, which is the right trade:
+      // the precision that matters here is where you click, not how sharp
+      // the label under it is.
+      maxNativeZoom: 19,
+      maxZoom: 22,
     }).addTo(map);
     // Forces the SVG renderer (and its <svg> element) to exist from the
     // start, regardless of whether any vector layer has been added yet —
@@ -626,7 +643,7 @@ export function RadioMap({
     if (!hasFitOnceRef.current && allLatLngs.length > 0) {
       hasFitOnceRef.current = true;
       map.invalidateSize();
-      map.fitBounds(allLatLngs, { maxZoom: 17 });
+      map.fitBounds(allLatLngs, { maxZoom: FIT_MAX_ZOOM });
     }
   }, [points, mode, polygons, onDeleteScanSession]);
 
@@ -634,7 +651,7 @@ export function RadioMap({
     const map = mapRef.current;
     if (!map || !lastBoundsRef.current) return;
     map.invalidateSize();
-    map.fitBounds(lastBoundsRef.current, { maxZoom: 17 });
+    map.fitBounds(lastBoundsRef.current, { maxZoom: FIT_MAX_ZOOM });
   }
 
   /**
@@ -747,7 +764,7 @@ export function RadioMap({
       // cut off" is the whole point of the report map.
       // animate:false so the view is final when this returns — an in-flight
       // pan would otherwise still be moving while the tiles are counted.
-      map.fitBounds(bounds, { padding: [24, 24], maxZoom: 17, animate: false });
+      map.fitBounds(bounds, { padding: [24, 24], maxZoom: FIT_MAX_ZOOM, animate: false });
     }
     await waitForTiles();
   }, [area, waitForTiles]);

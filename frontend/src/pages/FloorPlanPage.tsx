@@ -126,6 +126,14 @@ export function FloorPlanPage() {
   // meaningful footprint, and saving each click would have the heatmap
   // re-clip itself to a growing sliver while you're still drawing it.
   const [outlineDraft, setOutlineDraft] = useState<{ x: number; y: number }[] | null>(null);
+  // Where the outline is being traced. On the plan drawing you're following
+  // the architect's lines; on the map you're following your actual roof,
+  // which is the better reference when the two disagree — and the plan image
+  // is usually a crop or a sketch, so they often do. Either way the stored
+  // form is pixels: the backend converts, so the polygon survives the plan
+  // later being rotated or rescaled exactly as placed pins do.
+  const [outlineOn, setOutlineOn] = useState<"plan" | "map">("plan");
+  const [outlineWorldDraft, setOutlineWorldDraft] = useState<{ lat: number; lng: number }[]>([]);
   const outlineDragging = useRef<{ index: number; pointerId: number; moved: boolean } | null>(null);
   // A drag ends with a click on the same element, and this element's click
   // *deletes* the corner — so without this, moving a corner destroyed it.
@@ -374,29 +382,47 @@ export function FloorPlanPage() {
 
   /** Enters tracing mode, seeded with whatever outline is already stored so
    * an existing trace is edited rather than silently replaced. */
-  function startOutline() {
+  function startOutline(where: "plan" | "map") {
     if (!plan) return;
-    setOutlineDraft(plan.outline_points?.length ? [...plan.outline_points] : []);
+    setOutlineOn(where);
+    // Tracing on the map always starts fresh. A stored outline is in pixel
+    // space; showing it as a half-done world-space draft you then append to
+    // would silently mix the two, and the backend rejects that mixture
+    // precisely because it is almost always a bug rather than an intention.
+    setOutlineDraft(where === "plan" && plan.outline_points?.length ? [...plan.outline_points] : []);
+    setOutlineWorldDraft([]);
     setMode("outline");
     setSelectedPin(null);
     setApBssids([]);
     setSessionId("");
-    setMessage("Click each corner of the building. Three or more, then Save outline.");
+    if (where === "map") setShowAlignment(true);
+    setMessage(
+      where === "map"
+        ? "Click each corner of your building on the map. Three or more, then Save outline."
+        : "Click each corner of the building on the plan. Three or more, then Save outline.",
+    );
   }
 
   function cancelOutline() {
     setOutlineDraft(null);
+    setOutlineWorldDraft([]);
     setMode("place");
     setMessage(null);
   }
 
-  async function saveOutline(points: { x: number; y: number }[]) {
+  /** How many corners are in the trace, whichever space it's being drawn in. */
+  function outlineDraftCount() {
+    return outlineOn === "map" ? outlineWorldDraft.length : (outlineDraft ?? []).length;
+  }
+
+  async function saveOutline(points: { x: number; y: number }[] | { lat: number; lng: number }[]) {
     if (!plan) return;
     setBusy(true);
     setError(null);
     try {
       await api.saveFloorPlanOutline(plan.id, points);
       setOutlineDraft(null);
+      setOutlineWorldDraft([]);
       setMode("place");
       setMessage(
         points.length
@@ -565,6 +591,15 @@ export function FloorPlanPage() {
   }
 
   async function handleMapClick(lat: number, lng: number) {
+    // Tracing the footprint on the map. Until this existed the map only ever
+    // accepted two clicks in its whole life — the calibration anchors — and
+    // every click after those was silently ignored, which is exactly what
+    // "I can't put more than two points on the map" was.
+    if (mode === "outline" && outlineOn === "map") {
+      setOutlineWorldDraft((prev) => [...prev, { lat, lng }]);
+      return;
+    }
+
     if (mode !== "calibrate" || !pendingPlanPoint || !plan) return;
     const next = [...anchors, { imageX: pendingPlanPoint.x, imageY: pendingPlanPoint.y, lat, lng }];
     setPendingPlanPoint(null);
@@ -870,6 +905,11 @@ export function FloorPlanPage() {
               Anchor {anchors.length + 1} of 2.{" "}
               {pendingPlanPoint ? "Now click the same spot on this map." : "Click the plan first."}
             </p>
+          ) : mode === "outline" && outlineOn === "map" ? (
+            <p className="page-hint">
+              Click each corner of your building. The dashed shape is what you&rsquo;re drawing; the solid orange one
+              is where the plan currently sits.
+            </p>
           ) : (
             <p className="page-hint">
               The orange outline is where your plan currently sits. Nudge the bearing and scale above until it lines
@@ -879,7 +919,7 @@ export function FloorPlanPage() {
           <RadioMap
             points={[]}
             polygons={
-              plan.corners
+              (plan.corners
                 ? [
                     {
                       points: plan.corners,
@@ -897,10 +937,44 @@ export function FloorPlanPage() {
                     },
                   ]
                 : []
+              ).concat(
+                // The trace in progress, drawn alongside the current footprint
+                // so you can see both the shape you're making and the one it
+                // will replace. Two points is a line, which Leaflet is happy
+                // to render as a degenerate polygon and is a useful cue that
+                // the clicks are landing.
+                outlineWorldDraft.length >= 2
+                  ? [
+                      {
+                        points: outlineWorldDraft,
+                        color: "#22d3ee",
+                        fillOpacity: 0.15,
+                        exactOutline: true,
+                        label: "Building outline being traced",
+                      },
+                    ]
+                  : [],
+              )
             }
-            onMapClick={pendingPlanPoint ? handleMapClick : null}
+            // Clickable for calibration anchors, and now also while tracing
+            // the outline — the map previously accepted exactly two clicks
+            // ever and ignored the rest.
+            onMapClick={
+              pendingPlanPoint || (mode === "outline" && outlineOn === "map") ? handleMapClick : null
+            }
             initialCenter={here}
           />
+          {mode === "outline" && outlineOn === "map" && (
+            <p className="page-hint">
+              {outlineWorldDraft.length} corner{outlineWorldDraft.length === 1 ? "" : "s"} placed
+              {outlineWorldDraft.length > 0 && (
+                <>
+                  {" — "}
+                  <button onClick={() => setOutlineWorldDraft((prev) => prev.slice(0, -1))}>Undo last corner</button>
+                </>
+              )}
+            </p>
+          )}
           {!here && (
             <p className="page-hint">
               Couldn&rsquo;t read your location, so the map opened on its default view — pan to your home before
@@ -1146,33 +1220,42 @@ export function FloorPlanPage() {
           {mode === "outline" ? (
             <>
               <span className="step-armed">
-                Click each corner of the building
-                {outlineDraft && outlineDraft.length > 0
-                  ? ` — ${outlineDraft.length} so far${
-                      outlineDraft.length < 3 ? `, ${3 - outlineDraft.length} more needed` : ""
+                Click each corner of the building {outlineOn === "map" ? "on the map below" : "on the plan"}
+                {outlineDraftCount() > 0
+                  ? ` — ${outlineDraftCount()} so far${
+                      outlineDraftCount() < 3 ? `, ${3 - outlineDraftCount()} more needed` : ""
                     }`
                   : ""}
               </span>
               <button
-                onClick={() => saveOutline(outlineDraft ?? [])}
-                disabled={busy || (outlineDraft ?? []).length < 3}
+                onClick={() => saveOutline(outlineOn === "map" ? outlineWorldDraft : (outlineDraft ?? []))}
+                disabled={busy || outlineDraftCount() < 3}
                 className="active"
               >
                 Save outline
               </button>
-              <button onClick={() => setOutlineDraft([])} disabled={!outlineDraft?.length}>
+              <button
+                onClick={() => (outlineOn === "map" ? setOutlineWorldDraft([]) : setOutlineDraft([]))}
+                disabled={outlineDraftCount() === 0}
+              >
                 Start over
               </button>
               <button onClick={cancelOutline}>Cancel</button>
               <span className="page-hint" style={{ margin: 0 }}>
-                Drag a corner to move it, click one to remove it.
+                {outlineOn === "map"
+                  ? "Zoom right in on your roof first — the closer you are, the more accurate the trace."
+                  : "Drag a corner to move it, click one to remove it."}
               </span>
             </>
           ) : (
             <>
-              <button onClick={startOutline}>
-                {plan.outline_points?.length ? "Edit building outline" : "Trace building outline"}
+              <button onClick={() => startOutline("plan")}>
+                {plan.outline_points?.length ? "Edit outline on plan" : "Trace outline on plan"}
               </button>
+              {/* Tracing on the map follows the actual roof rather than the
+                  architect's drawing, which is the better reference whenever
+                  the plan image is a crop, a sketch, or just slightly off. */}
+              <button onClick={() => startOutline("map")}>Trace outline on map</button>
               {plan.outline_points?.length > 0 && (
                 <>
                   <button onClick={() => saveOutline([])} disabled={busy}>
@@ -1193,9 +1276,22 @@ export function FloorPlanPage() {
         </div>
       )}
 
-      {plan && plan.is_calibrated && ssids.length > 0 && (
+      {/* Shown whenever the plan is calibrated, NOT only once a network is
+          picked. Hiding the whole row until then meant the threshold slider
+          simply wasn't on the page, with nothing saying why or how to get it
+          back — and on a phone, where step 3 is a long scroll up rather than
+          sitting alongside the plan, that reads as a missing feature rather
+          than an unmet precondition. A disabled control that explains itself
+          is worth more than an absent one. */}
+      {plan && plan.is_calibrated && (
         <div className="control-row floorplan-view-controls">
-          <label style={{ flex: "1 1 22rem" }}>
+          {ssids.length === 0 && (
+            <span className="page-hint" style={{ margin: 0, flexBasis: "100%" }}>
+              Pick your networks in step&nbsp;3 above to measure coverage — until then there&rsquo;s no signal to
+              threshold.
+            </span>
+          )}
+          <label style={{ flex: "1 1 22rem", opacity: ssids.length === 0 ? 0.5 : 1 }}>
             Weak below
             {/* -40 to -90 dBm spans "right next to the router" to "barely
                 audible"; anything outside that isn't a useful place to draw
@@ -1208,23 +1304,30 @@ export function FloorPlanPage() {
               max={-40}
               step={1}
               value={thresholdShown}
+              disabled={ssids.length === 0}
               onChange={(e) => changeThreshold(Number(e.target.value))}
               style={{ flex: 1 }}
             />
             <output className="mono">{thresholdShown} dBm</output>
           </label>
-          <label>
+          <label style={{ opacity: ssids.length === 0 ? 0.5 : 1 }}>
             Coverage
-            <select value={layer} onChange={(e) => setLayer(e.target.value as typeof layer)}>
+            <select
+              value={layer}
+              disabled={ssids.length === 0}
+              onChange={(e) => setLayer(e.target.value as typeof layer)}
+            >
               <option value="measured">Measured (interpolated)</option>
               <option value="predicted">Predicted from access points</option>
               <option value="none">Points only</option>
             </select>
           </label>
           <span className="page-hint" style={{ margin: 0 }}>
-            {coverage.data
-              ? `${coverage.data.weak_count} of ${coverage.data.measured_count} measured points are weak`
-              : "measuring…"}
+            {ssids.length === 0
+              ? "no networks selected"
+              : coverage.data
+                ? `${coverage.data.weak_count} of ${coverage.data.measured_count} measured points are weak`
+                : "measuring…"}
           </span>
         </div>
       )}

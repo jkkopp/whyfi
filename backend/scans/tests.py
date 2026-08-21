@@ -3060,3 +3060,99 @@ class FloorPlanPredictedCoverageTests(TestCase):
         body = self.client.get(self._url()).json()["prediction"]
         ref = body["sources"][0]["ref_rssi_at_1m"]
         self.assertTrue(all(c["rssi"] <= ref + 1e-6 for c in body["cells"]))
+
+
+class FloorPlanOutlineFromMapTests(TestCase):
+    """Tracing the footprint on the map rather than on the plan drawing.
+
+    The map used to accept exactly two clicks in its entire life — the two
+    calibration anchors — and silently ignore every one after that. Following
+    the actual roof is often a better reference than the architect's drawing,
+    which is frequently a crop or a sketch.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="map-outline", password="test-pass-123")
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.plan = FloorPlan.objects.create(
+            name="Map traced", image="floorplans/test.png",
+            image_width_px=1000, image_height_px=800,
+            anchor1_image_x=0.0, anchor1_image_y=800.0, anchor1_lat=48.1355, anchor1_lng=11.5825,
+            anchor2_image_x=100.0, anchor2_image_y=800.0,
+            anchor2_lat=48.1355, anchor2_lng=11.5825 + 10 / (111320 * 0.668),
+            meters_per_pixel=0.1, bearing_deg=0.0,
+        )
+
+    def _url(self):
+        return f"/api/v1/floor-plans/{self.plan.id}/outline/"
+
+    def test_world_points_are_converted_and_stored_as_pixels(self):
+        # Round-trip: take four known pixel corners out to the world, send
+        # those back as a map-traced outline, and they must land where they
+        # started. Storing pixels is what makes an outline survive the plan
+        # later being rotated or rescaled.
+        from scans.floorplan import image_to_world
+
+        pixels = [(100.0, 100.0), (700.0, 120.0), (680.0, 600.0), (120.0, 640.0)]
+        world = [dict(zip(("lat", "lng"), image_to_world(self.plan, x, y))) for x, y in pixels]
+
+        body = self.client.post(self._url(), {"points": world}, format="json").json()
+        stored = body["outline_points"]
+        self.assertEqual(len(stored), 4)
+        for (want_x, want_y), got in zip(pixels, stored):
+            self.assertAlmostEqual(got["x"], want_x, places=3)
+            self.assertAlmostEqual(got["y"], want_y, places=3)
+
+    def test_a_map_traced_outline_drives_the_footprint_and_the_heatmap_clip(self):
+        from scans.floorplan import image_to_world, outline_pixels
+
+        world = [
+            dict(zip(("lat", "lng"), image_to_world(self.plan, x, y)))
+            for x, y in [(0.0, 0.0), (500.0, 0.0), (500.0, 800.0), (0.0, 800.0)]
+        ]
+        body = self.client.post(self._url(), {"points": world}, format="json").json()
+        self.assertEqual(len(body["corners"]), 4)
+        self.plan.refresh_from_db()
+        self.assertEqual(len(outline_pixels(self.plan)), 4)
+
+    def test_mixing_pixel_and_world_points_is_rejected(self):
+        response = self.client.post(
+            self._url(),
+            {"points": [{"x": 1, "y": 2}, {"lat": 48.1, "lng": 11.5}, {"x": 3, "y": 4}]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.plan.refresh_from_db()
+        self.assertEqual(self.plan.outline_points, [])
+
+    def test_world_points_need_a_calibrated_plan(self):
+        uncalibrated = FloorPlan.objects.create(
+            name="Raw", image="floorplans/test.png", image_width_px=100, image_height_px=100,
+        )
+        response = self.client.post(
+            f"/api/v1/floor-plans/{uncalibrated.id}/outline/",
+            {"points": [{"lat": 48.1, "lng": 11.5}, {"lat": 48.2, "lng": 11.6}, {"lat": 48.3, "lng": 11.7}]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_world_points_outside_the_plan_are_clamped_to_it(self):
+        # Clicking a roof corner slightly outside the plan's own rectangle is
+        # ordinary — the drawing is often a crop — and snapping to the border
+        # is more useful than refusing the trace.
+        from scans.floorplan import image_to_world
+
+        world = [
+            dict(zip(("lat", "lng"), image_to_world(self.plan, x, y)))
+            for x, y in [(-400.0, -300.0), (1500.0, 0.0), (1400.0, 1600.0)]
+        ]
+        stored = self.client.post(self._url(), {"points": world}, format="json").json()["outline_points"]
+        self.assertEqual(stored[0], {"x": 0.0, "y": 0.0})
+        self.assertEqual(stored[1]["x"], 1000.0)
+        self.assertEqual(stored[2]["y"], 800.0)
+
+    def test_malformed_world_points_are_rejected(self):
+        for bad in ([{"lat": "x", "lng": 1}] * 3, [{"lat": 48.1}] * 3):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.client.post(self._url(), {"points": bad}, format="json").status_code, 400)

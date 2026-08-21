@@ -25,6 +25,7 @@ from .floorplan import (
     predict_coverage,
     plan_corners,
     solve_transform,
+    world_to_image,
     suggest_ap_placements,
 )
 from .estimators import (
@@ -2387,6 +2388,15 @@ class FloorPlanViewSet(viewsets.ModelViewSet):
         order. An empty list clears the trace and everything reverts to the
         image's own rectangle.
 
+        Alternatively {"points": [{"lat": .., "lng": ..}, ...]} for an outline
+        traced on the map rather than on the plan drawing. Converted here via
+        world_to_image so the transform has exactly one implementation and the
+        stored form stays pixels — which is what makes an outline survive the
+        plan later being rotated or rescaled, exactly as placed pins do.
+        Mixing the two forms in one request is rejected rather than guessed
+        at: a half-pixel, half-world polygon is far more likely to be a
+        frontend bug than an intention.
+
         Validated here rather than trusted: these coordinates drive both the
         map footprint and the heatmap clip, and a malformed or degenerate
         polygon would either crash the ray cast or silently blank the entire
@@ -2397,14 +2407,31 @@ class FloorPlanViewSet(viewsets.ModelViewSet):
         if raw is None or not isinstance(raw, list):
             return Response({"detail": "points must be a list."}, status=400)
 
+        world_form = any(isinstance(p, dict) and "lat" in p for p in raw)
+        if world_form and any(isinstance(p, dict) and "x" in p for p in raw):
+            return Response(
+                {"detail": "Give the outline either as x/y pixels or as lat/lng, not a mixture."},
+                status=400,
+            )
+        if world_form and world_to_image(plan, 0.0, 0.0) is None:
+            return Response(
+                {"detail": "Calibrate this plan before tracing its outline on the map."},
+                status=400,
+            )
+
         points = []
         for point in raw:
             if not isinstance(point, dict):
                 return Response({"detail": "Each point must be an object with x and y."}, status=400)
             try:
-                x, y = float(point["x"]), float(point["y"])
+                if world_form:
+                    x, y = world_to_image(plan, float(point["lat"]), float(point["lng"]))
+                else:
+                    x, y = float(point["x"]), float(point["y"])
             except (KeyError, TypeError, ValueError):
-                return Response({"detail": "Each point needs numeric x and y."}, status=400)
+                return Response(
+                    {"detail": "Each point needs numeric x and y (or lat and lng)."}, status=400
+                )
             if not (math.isfinite(x) and math.isfinite(y)):
                 return Response({"detail": "Point coordinates must be finite."}, status=400)
             # Clamped, not rejected: a vertex dragged a little past the edge of
