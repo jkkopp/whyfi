@@ -1386,6 +1386,24 @@ button:disabled {
   pointer-events: none;
 }
 
+/* Predicted coverage, and it has to be tellable from measured coverage
+   without reading a legend. Same green-to-red scale, since the colour means
+   the same thing, but overlaid with diagonal hatching — the convention for
+   "inferred" on a drawing, and one that survives being printed in grey.
+   pointer-events stay on so a cell can report which access point it came
+   from and how far away it is. */
+.floorplan-heat-cell.is-predicted {
+  opacity: 0.5;
+  pointer-events: auto;
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.55) 0,
+    rgba(255, 255, 255, 0.55) 2px,
+    transparent 2px,
+    transparent 5px
+  );
+}
+
 /* A surveyed access-point location. Square and outlined so it reads as a
    different kind of thing from the round measurement spots — one is where a
    transmitter is, the other is where you stood. */

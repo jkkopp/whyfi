@@ -1,3 +1,4 @@
+import math
 from unittest import mock
 
 from django.contrib.auth import get_user_model
@@ -2899,3 +2900,163 @@ class FloorPlanOutlineTests(TestCase):
     def test_anonymous_cannot_store_an_outline(self):
         response = APIClient().post(self._url("outline"), {"points": []}, format="json")
         self.assertEqual(response.status_code, 403)
+
+
+class FloorPlanPredictedCoverageTests(TestCase):
+    """Signal predicted outward from a placed access point.
+
+    A different question from the interpolated surface: interpolation is
+    anchored on where you walked and says nothing about a room you never
+    entered; prediction is anchored on the transmitter and covers the whole
+    floor. Both are useful, and confusing one for the other would mean
+    treating a model output as an observation.
+    """
+
+    def setUp(self):
+        self.sensor = Sensor.objects.create(name="Predict Phone")
+        self.user = get_user_model().objects.create_user(username="predict-op", password="test-pass-123")
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        # 0.1 m/px over 1000x800: a 10m x 8m floor.
+        self.plan = FloorPlan.objects.create(
+            name="Predicted", image="floorplans/test.png",
+            image_width_px=1000, image_height_px=800,
+            anchor1_image_x=0.0, anchor1_image_y=800.0, anchor1_lat=48.1355, anchor1_lng=11.5825,
+            anchor2_image_x=100.0, anchor2_image_y=800.0,
+            anchor2_lat=48.1355, anchor2_lng=11.5825 + 10 / (111320 * 0.668),
+            meters_per_pixel=0.1, bearing_deg=0.0,
+        )
+        self.ap = AccessPoint.objects.create(bssid="aa:bb:cc:dd:ee:21", ssid="HomeNet")
+
+    def _url(self, extra=""):
+        return (
+            f"/api/v1/floor-plans/{self.plan.id}/coverage/?ssid_exact=HomeNet"
+            f"&include_prediction=1&heatmap_steps=20{extra}"
+        )
+
+    def _place_ap(self, x, y):
+        GroundTruthPosition.objects.create(
+            kind=GroundTruthPosition.Kind.ACCESS_POINT, target_key=self.ap.bssid,
+            latitude=48.1355, longitude=11.5825, floor_plan=self.plan, image_x=x, image_y=y,
+        )
+
+    def _place_reading(self, name, x, y, rssi):
+        session = ScanSession.objects.create(
+            sensor=self.sensor, client_scan_id=name,
+            started_at="2026-08-15T10:00:00Z", completed_at="2026-08-15T10:00:05Z",
+            latitude=48.1355, longitude=11.5825,
+        )
+        GroundTruthPosition.objects.create(
+            kind=GroundTruthPosition.Kind.OBSERVER, target_key=str(session.id),
+            latitude=48.1355, longitude=11.5825, floor_plan=self.plan, image_x=x, image_y=y,
+        )
+        WiFiObservation.objects.create(
+            scan_session=session, access_point=self.ap, rssi=rssi, frequency_mhz=2437,
+            channel=6, band="2.4GHz", capabilities_raw="[ESS]", observed_at="2026-08-15T10:00:03Z",
+        )
+
+    def test_no_placed_ap_means_no_prediction(self):
+        self._place_reading("p-none", 100.0, 100.0, -50)
+        self.assertIsNone(self.client.get(self._url()).json()["prediction"])
+
+    def test_prediction_is_absent_unless_asked_for(self):
+        self._place_ap(500.0, 400.0)
+        body = self.client.get(
+            f"/api/v1/floor-plans/{self.plan.id}/coverage/?ssid_exact=HomeNet"
+        ).json()
+        self.assertIsNone(body["prediction"])
+
+    def test_signal_falls_off_with_distance_from_the_access_point(self):
+        # This is the whole point: strongest at the transmitter, weakening
+        # outward — not strongest wherever somebody happened to stand.
+        self._place_ap(500.0, 400.0)
+        cells = self.client.get(self._url()).json()["prediction"]["cells"]
+        self.assertTrue(cells)
+
+        def distance_px(cell):
+            return math.hypot(cell["image_x"] - 500.0, cell["image_y"] - 400.0)
+
+        nearest = min(cells, key=distance_px)
+        farthest = max(cells, key=distance_px)
+        self.assertGreater(nearest["rssi"], farthest["rssi"])
+
+        # And monotonically so, which a correlation-free spot check wouldn't catch.
+        ordered = sorted(cells, key=distance_px)
+        rssis = [c["rssi"] for c in ordered]
+        self.assertEqual(rssis, sorted(rssis, reverse=True))
+
+    def test_prediction_covers_ground_the_interpolation_will_not(self):
+        # One reading in a corner. Interpolation must stay near it; prediction
+        # should still describe the far side of the floor.
+        self._place_ap(500.0, 400.0)
+        self._place_reading("p-corner", 60.0, 60.0, -55)
+        body = self.client.get(self._url() + "&include_heatmap=1").json()
+
+        painted = [c for c in body["heatmap"]["cells"] if c["rssi"] is not None]
+        predicted = body["prediction"]["cells"]
+        self.assertGreater(len(predicted), len(painted))
+
+    def test_each_cell_names_the_access_point_it_came_from(self):
+        self._place_ap(500.0, 400.0)
+        cells = self.client.get(self._url()).json()["prediction"]["cells"]
+        self.assertTrue(all(c["bssid"] == self.ap.bssid for c in cells))
+
+    def test_the_strongest_of_several_access_points_wins_each_cell(self):
+        # What you actually experience in a room is whichever radio is
+        # strongest there, not the average of them.
+        other = AccessPoint.objects.create(bssid="aa:bb:cc:dd:ee:22", ssid="HomeNet")
+        self._place_ap(100.0, 100.0)
+        GroundTruthPosition.objects.create(
+            kind=GroundTruthPosition.Kind.ACCESS_POINT, target_key=other.bssid,
+            latitude=48.1355, longitude=11.5825, floor_plan=self.plan, image_x=900.0, image_y=700.0,
+        )
+        cells = self.client.get(self._url()).json()["prediction"]["cells"]
+        near_first = min(cells, key=lambda c: math.hypot(c["image_x"] - 100, c["image_y"] - 100))
+        near_second = min(cells, key=lambda c: math.hypot(c["image_x"] - 900, c["image_y"] - 700))
+        self.assertEqual(near_first["bssid"], self.ap.bssid)
+        self.assertEqual(near_second["bssid"], other.bssid)
+
+    def test_falloff_is_fitted_to_real_readings_when_there_are_enough(self):
+        self._place_ap(100.0, 400.0)
+        # Eight readings spread over distance — the same bar the
+        # deployment-wide path-loss calibration insists on, deliberately, since
+        # this is the same least-squares fit.
+        for i, (x, rssi) in enumerate(
+            [(120.0, -38), (200.0, -52), (300.0, -60), (400.0, -66),
+             (500.0, -70), (600.0, -74), (700.0, -77), (800.0, -80)]
+        ):
+            self._place_reading(f"p-fit-{i}", x, 400.0, rssi)
+        source = self.client.get(self._url()).json()["prediction"]["sources"][0]
+        self.assertEqual(source["source"], "fitted")
+        self.assertEqual(source["sample_count"], 8)
+        self.assertIsNotNone(source["r_squared"])
+
+    def test_falloff_falls_back_to_the_model_with_too_few_readings(self):
+        self._place_ap(100.0, 400.0)
+        for i, x in enumerate([200.0, 400.0, 600.0]):
+            self._place_reading(f"p-few-{i}", x, 400.0, -60 - i * 8)
+        source = self.client.get(self._url()).json()["prediction"]["sources"][0]
+        self.assertEqual(source["source"], "model")
+        self.assertIsNone(source["r_squared"])
+
+    def test_prediction_is_clipped_to_the_traced_outline(self):
+        self._place_ap(500.0, 400.0)
+        before = len(self.client.get(self._url()).json()["prediction"]["cells"])
+        self.client.post(
+            f"/api/v1/floor-plans/{self.plan.id}/outline/",
+            {"points": [{"x": 0, "y": 0}, {"x": 500, "y": 0}, {"x": 500, "y": 800}, {"x": 0, "y": 800}]},
+            format="json",
+        )
+        after = self.client.get(self._url()).json()["prediction"]["cells"]
+        self.assertLess(len(after), before)
+        self.assertTrue(all(c["image_x"] <= 500 for c in after))
+
+    def test_no_cell_is_stronger_than_the_reference_at_one_metre(self):
+        # The log-distance model diverges toward the transmitter; without a
+        # floor on the distance it reports physically impossible strength in
+        # the cell the AP sits in.
+        self._place_ap(500.0, 400.0)
+        body = self.client.get(self._url()).json()["prediction"]
+        ref = body["sources"][0]["ref_rssi_at_1m"]
+        self.assertTrue(all(c["rssi"] <= ref + 1e-6 for c in body["cells"]))

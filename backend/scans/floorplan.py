@@ -224,6 +224,25 @@ def interpolate_coverage(points, width_px, height_px, steps=40, outline=None):
     return {"cells": cells, "steps": steps, "max_influence_px": max_influence}
 
 
+# A predicted surface is only worth drawing close enough to its transmitter
+# that the path-loss model still means something. Beyond this the curve is
+# flat, every cell reads "very weak", and the picture stops distinguishing
+# anything. Expressed in metres because propagation is a physical fact, not a
+# property of how big the plan image happens to be.
+PREDICTION_MAX_RANGE_M = 35.0
+
+# Deliberately the same bar as the deployment-wide path-loss calibration
+# rather than a laxer one of its own.
+#
+# There is a real argument for going lower here: those distances come from
+# GPS, whereas these are exact, both ends being pinned pixels on a calibrated
+# plan. But it's the same least-squares fit, and a second, more permissive
+# threshold for the identical statistical operation is how you end up
+# publishing a confident-looking curve drawn through four points. When there
+# aren't enough readings the shared model is used and the response says so,
+# which is more useful than a fit nobody should trust.
+from .calibration import MIN_CALIBRATION_SAMPLES as MIN_SAMPLES_FOR_PER_AP_FIT
+
 MIN_OUTLINE_VERTICES = 3
 
 
@@ -265,6 +284,144 @@ def point_in_outline(x, y, outline):
             if x < x1 + t * (x2 - x1):
                 inside = not inside
     return inside
+
+
+def fit_ap_falloff(ap, points, meters_per_pixel, fallback):
+    """How signal from one access point falls off, fitted to this plan's own
+    measurements where there are enough of them.
+
+    The distance from a placed AP to a placed measurement point is *known*
+    here — both are pixel positions on a calibrated plan — so each reading is
+    a clean (distance, rssi) pair with no GPS error in it. That's much better
+    input than the generic indoor constants, and it's the difference between a
+    prediction shaped like this building and one shaped like a textbook.
+
+    Falls back to the shared model when a given AP has too few readings to
+    support a fit of its own, or when the fit comes out implausible (signal
+    apparently strengthening with distance, which means noise won the fit).
+    """
+    samples = []
+    for point in points:
+        if point.get("rssi") is None:
+            continue
+        distance_px = math.hypot(point["image_x"] - ap["image_x"], point["image_y"] - ap["image_y"])
+        samples.append({"rssi": point["rssi"], "distance_m": distance_px * meters_per_pixel})
+
+    if len(samples) >= MIN_SAMPLES_FOR_PER_AP_FIT:
+        from .calibration import fit_path_loss
+
+        fit = fit_path_loss(samples)
+        if fit.get("available") and fit.get("plausible"):
+            return {
+                "ref_rssi_at_1m": fit["ref_rssi_at_1m"],
+                "path_loss_exponent": fit["path_loss_exponent"],
+                "source": "fitted",
+                "sample_count": fit["sample_count"],
+                "r_squared": fit["r_squared"],
+            }
+
+    return {
+        "ref_rssi_at_1m": fallback["ref_rssi_at_1m"],
+        "path_loss_exponent": fallback["path_loss_exponent"],
+        "source": "model",
+        "sample_count": len(samples),
+        "r_squared": None,
+    }
+
+
+def predict_coverage(plan, placed_aps, points, fallback_model, steps=40, outline=None):
+    """Signal predicted outward from each placed access point.
+
+    This answers a different question from interpolate_coverage, and the two
+    must not be confused. Interpolation says "here is what was measured, and
+    what that implies about the space between the measurements" — it is
+    anchored on where you walked, so it says nothing at all about a room you
+    never entered. This says "here is where the signal from this box should
+    reach, given how it fell off everywhere you did measure" — it is anchored
+    on the transmitter, so it covers the whole floor, including rooms with no
+    readings.
+
+    That reach is the reason to want it (where does the router actually
+    cover?) and also the reason to be careful with it: every cell is a
+    model output, not an observation. Straight-line path loss with no walls in
+    it will be optimistic through masonry and pessimistic nowhere. The caller
+    is expected to label it as modelled and keep it visually distinct from
+    measured data — see docs/walls-obstacles-design.md, which exists because
+    modelling the walls is what would make this trustworthy rather than
+    merely useful.
+
+    Returns cells carrying the best predicted RSSI across all placed APs,
+    plus which AP won each cell, so the frontend can show the coverage as
+    belonging to a specific transmitter.
+    """
+    if not placed_aps or not plan.meters_per_pixel:
+        return None
+
+    steps = max(4, min(steps, 80))
+    meters_per_pixel = plan.meters_per_pixel
+
+    sources = []
+    for ap in placed_aps:
+        if ap.get("image_x") is None or ap.get("image_y") is None:
+            continue
+        sources.append({
+            "bssid": ap["bssid"],
+            "image_x": ap["image_x"],
+            "image_y": ap["image_y"],
+            "falloff": fit_ap_falloff(ap, points, meters_per_pixel, fallback_model),
+        })
+    if not sources:
+        return None
+
+    cells = []
+    for row in range(steps):
+        for col in range(steps):
+            x = (col + 0.5) * plan.image_width_px / steps
+            y = (row + 0.5) * plan.image_height_px / steps
+
+            if outline is not None and not point_in_outline(x, y, outline):
+                continue
+
+            best_rssi = None
+            best_bssid = None
+            best_distance = None
+            for source in sources:
+                distance_m = math.hypot(x - source["image_x"], y - source["image_y"]) * meters_per_pixel
+                if distance_m > PREDICTION_MAX_RANGE_M:
+                    continue
+                # Clamped at 1m: the log-distance model diverges toward the
+                # transmitter and would report physically impossible strength
+                # in the cell the AP sits in.
+                effective = max(distance_m, 1.0)
+                falloff = source["falloff"]
+                rssi = falloff["ref_rssi_at_1m"] - 10 * falloff["path_loss_exponent"] * math.log10(effective)
+                if best_rssi is None or rssi > best_rssi:
+                    best_rssi, best_bssid, best_distance = rssi, source["bssid"], distance_m
+
+            if best_rssi is None:
+                continue
+            cells.append({
+                "image_x": x,
+                "image_y": y,
+                "rssi": round(best_rssi, 1),
+                "bssid": best_bssid,
+                "distance_m": round(best_distance, 2),
+            })
+
+    return {
+        "cells": cells,
+        "steps": steps,
+        "max_range_m": PREDICTION_MAX_RANGE_M,
+        "sources": [
+            {
+                "bssid": s["bssid"],
+                "image_x": s["image_x"],
+                "image_y": s["image_y"],
+                **s["falloff"],
+            }
+            for s in sources
+        ],
+    }
 
 
 def plan_corners(plan):

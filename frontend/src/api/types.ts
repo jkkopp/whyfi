@@ -729,11 +729,51 @@ export interface ApPlacementSuggestion {
   rationale: string;
 }
 
+/** One cell of the *predicted* surface. Unlike FloorPlanHeatmapCell this is
+ * a model output, not an inference from nearby observations: it says where
+ * the signal from `bssid` should reach, given how it fell off everywhere that
+ * was measured. It therefore covers rooms nobody walked through — which is
+ * both the reason to want it and the reason it must never be rendered as if
+ * it were measured data. */
+export interface FloorPlanPredictionCell {
+  image_x: number;
+  image_y: number;
+  rssi: number;
+  bssid: string;
+  distance_m: number;
+}
+
+/** A transmitter the prediction radiates from, and how its falloff was
+ * arrived at. `source: "fitted"` means the curve was fitted to real readings
+ * on this plan; `"model"` means there weren't enough and generic indoor
+ * constants were used instead. Worth surfacing: the two deserve different
+ * amounts of trust. */
+export interface FloorPlanPredictionSource {
+  bssid: string;
+  image_x: number;
+  image_y: number;
+  ref_rssi_at_1m: number;
+  path_loss_exponent: number;
+  source: "fitted" | "model";
+  sample_count: number;
+  r_squared: number | null;
+}
+
+export interface FloorPlanPrediction {
+  cells: FloorPlanPredictionCell[];
+  steps: number;
+  max_range_m: number;
+  sources: FloorPlanPredictionSource[];
+}
+
 export interface FloorPlanCoverage {
   ssids: string[];
   weak_threshold_dbm: number;
   points: FloorPlanCoveragePoint[];
   heatmap: FloorPlanHeatmap | null;
+  /** Predicted coverage from placed access points. Null unless asked for, or
+   * when no access point has been placed. */
+  prediction: FloorPlanPrediction | null;
   placed_aps: { bssid: string; image_x: number; image_y: number; label: string }[];
   suggestions: ApPlacementSuggestion[];
   weak_count: number;

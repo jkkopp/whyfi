@@ -22,6 +22,7 @@ from .floorplan import (
     MIN_OUTLINE_VERTICES,
     interpolate_coverage,
     outline_pixels,
+    predict_coverage,
     plan_corners,
     solve_transform,
     suggest_ap_placements,
@@ -2526,6 +2527,32 @@ class FloorPlanViewSet(viewsets.ModelViewSet):
             return Response({"detail": "At least one ssid_exact is required."}, status=400)
         weak_threshold = parse_float(request.query_params.get("weak_threshold_dbm"), -70.0)
 
+        placed_aps = [
+            {"bssid": pin.target_key, "image_x": pin.image_x, "image_y": pin.image_y, "label": pin.label}
+            for pin in plan.placements.filter(kind=GroundTruthPosition.Kind.ACCESS_POINT).exclude(image_x__isnull=True)
+        ]
+
+        def build_prediction(points):
+            """Predicted coverage radiating out from each placed access point.
+
+            Deliberately independent of whether any measurements exist: "where
+            does this router actually reach?" is answerable from the
+            transmitter's position alone, and it is the first thing worth
+            knowing after pinning an AP — before any walking has been done.
+            Measurements, when present, only improve it by fitting the falloff
+            to this building instead of using generic constants.
+            """
+            if request.query_params.get("include_prediction") != "1" or not placed_aps:
+                return None
+            return predict_coverage(
+                plan,
+                placed_aps,
+                points,
+                fallback_model=active_range_model("wifi") or RANGE_MODEL["wifi"],
+                steps=positive_int(request.query_params.get("heatmap_steps"), 40, maximum=80),
+                outline=outline_pixels(plan),
+            )
+
         placements = plan.placements.filter(kind=GroundTruthPosition.Kind.OBSERVER).exclude(image_x__isnull=True)
         by_session = {p.target_key: p for p in placements}
         if not by_session:
@@ -2539,7 +2566,8 @@ class FloorPlanViewSet(viewsets.ModelViewSet):
                 "weak_threshold_dbm": weak_threshold,
                 "points": [],
                 "heatmap": None,
-                "placed_aps": [],
+                "prediction": build_prediction([]),
+                "placed_aps": placed_aps,
                 "suggestions": [],
                 "weak_count": 0,
                 "measured_count": 0,
@@ -2591,14 +2619,12 @@ class FloorPlanViewSet(viewsets.ModelViewSet):
                 outline=outline_pixels(plan),
             )
 
-        placed_aps = [
-            {"bssid": pin.target_key, "image_x": pin.image_x, "image_y": pin.image_y, "label": pin.label}
-            for pin in plan.placements.filter(kind=GroundTruthPosition.Kind.ACCESS_POINT).exclude(image_x__isnull=True)
-        ]
+        prediction = build_prediction(points)
 
         return Response({
             "ssids": ssids,
             "heatmap": heatmap,
+            "prediction": prediction,
             "placed_aps": placed_aps,
             "suggestions": suggest_ap_placements(points, placed_aps, plan),
             "weak_threshold_dbm": weak_threshold,

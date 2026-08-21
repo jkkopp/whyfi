@@ -395,13 +395,14 @@ export const api = {
     id: number,
     ssids: string[],
     weakThresholdDbm: number,
-    opts: { includeHeatmap?: boolean; heatmapSteps?: number } = {},
+    opts: { includeHeatmap?: boolean; includePrediction?: boolean; heatmapSteps?: number } = {},
   ) =>
     get<FloorPlanCoverage>(
       `/floor-plans/${id}/coverage/?` +
         ssids.map((s) => `ssid_exact=${encodeURIComponent(s)}`).join("&") +
         `&weak_threshold_dbm=${weakThresholdDbm}` +
         `${opts.includeHeatmap ? "&include_heatmap=1" : ""}` +
+        `${opts.includePrediction ? "&include_prediction=1" : ""}` +
         `${opts.heatmapSteps ? `&heatmap_steps=${opts.heatmapSteps}` : ""}`,
     ),
 

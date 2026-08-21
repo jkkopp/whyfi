@@ -34,7 +34,15 @@ export function FloorPlanPage() {
   // Several, because a router commonly names its 2.4 and 5GHz radios
   // differently — they're one network for coverage purposes.
   const [ssids, setSsids] = useState<string[]>([]);
-  const [showHeatmap, setShowHeatmap] = useState(true);
+  // Which coverage surface is on the plan. These answer different questions
+  // and are mutually exclusive on purpose: overlaying a model output on top
+  // of measured data, in the same colours, is the fastest way to end up
+  // trusting a prediction about a room you never entered.
+  //   measured  — IDW between the points you actually placed.
+  //   predicted — path loss radiating out from each placed access point.
+  const [layer, setLayer] = useState<"measured" | "predicted" | "none">("measured");
+  const showHeatmap = layer === "measured";
+  const showPrediction = layer === "predicted";
   // Multi-select, because one physical box has a 2.4 and a 5GHz radio with
   // different BSSIDs at the *same* place — placing them one at a time would
   // mean clicking the same pixel twice and hoping.
@@ -141,10 +149,14 @@ export function FloorPlanPage() {
   const coverage = usePolling(
     () =>
       plan && ssids.length
-        ? api.floorPlanCoverage(plan.id, ssids, threshold, { includeHeatmap: showHeatmap, heatmapSteps: 44 })
+        ? api.floorPlanCoverage(plan.id, ssids, threshold, {
+            includeHeatmap: showHeatmap,
+            includePrediction: showPrediction,
+            heatmapSteps: 44,
+          })
         : Promise.resolve(null),
     30000,
-    [plan?.id, ssids.join("|"), threshold, showHeatmap, refreshKey],
+    [plan?.id, ssids.join("|"), threshold, showHeatmap, showPrediction, refreshKey],
   );
 
   // Networks actually audible at the plan's location, rather than every SSID
@@ -196,6 +208,33 @@ export function FloorPlanPage() {
   function restoreCandidates() {
     setDismissed([]);
     if (dismissKey) localStorage.removeItem(dismissKey);
+  }
+
+  // Which networks you're surveying, remembered per plan.
+  //
+  // This used to reset to nothing on every load, and everything downstream of
+  // it — the coverage layer, the weak-spot threshold, the whole set of view
+  // controls — is only rendered once at least one network is picked. On a
+  // desktop that's invisible, because step 3 is on screen next to the plan
+  // and you tick it without thinking. On a phone the steps are stacked, so
+  // you land on the plan with no controls at all and nothing says why: the
+  // threshold slider simply isn't there until you scroll back up and re-pick
+  // the same networks you picked last time. Your own router is not a
+  // per-session decision.
+  const ssidKey = plan ? `whyfi-floorplan-ssids-${plan.id}` : null;
+  useEffect(() => {
+    if (!ssidKey) return;
+    try {
+      const saved = JSON.parse(localStorage.getItem(ssidKey) ?? "[]");
+      setSsids(Array.isArray(saved) ? saved.filter((s) => typeof s === "string") : []);
+    } catch {
+      setSsids([]);
+    }
+  }, [ssidKey]);
+
+  function changeSsids(next: string[]) {
+    setSsids(next);
+    if (ssidKey) localStorage.setItem(ssidKey, JSON.stringify(next));
   }
 
 
@@ -640,7 +679,15 @@ export function FloorPlanPage() {
         summary={summary}
         viewSettings={[
           { label: "Weak threshold", value: `${threshold} dBm` },
-          { label: "Heatmap", value: showHeatmap ? "interpolated (IDW)" : "measured points only" },
+          {
+            label: "Coverage layer",
+            value:
+              layer === "measured"
+                ? "measured — interpolated (IDW)"
+                : layer === "predicted"
+                  ? "PREDICTED from placed access points — modelled, not measured"
+                  : "measured points only",
+          },
           {
             label: "Unmeasured areas",
             value: "left blank — coverage is only claimed where it was measured",
@@ -885,7 +932,7 @@ export function FloorPlanPage() {
                   type="checkbox"
                   checked={ssids.includes(n.ssid)}
                   onChange={(e) =>
-                    setSsids((prev) => (e.target.checked ? [...prev, n.ssid] : prev.filter((x) => x !== n.ssid)))
+                    changeSsids(e.target.checked ? [...ssids, n.ssid] : ssids.filter((x) => x !== n.ssid))
                   }
                 />
                 {n.ssid}{" "}
@@ -1167,12 +1214,12 @@ export function FloorPlanPage() {
             <output className="mono">{thresholdShown} dBm</output>
           </label>
           <label>
-            <input
-              type="checkbox"
-              checked={showHeatmap}
-              onChange={(e) => setShowHeatmap(e.target.checked)}
-            />
-            Interpolated heatmap
+            Coverage
+            <select value={layer} onChange={(e) => setLayer(e.target.value as typeof layer)}>
+              <option value="measured">Measured (interpolated)</option>
+              <option value="predicted">Predicted from access points</option>
+              <option value="none">Points only</option>
+            </select>
           </label>
           <span className="page-hint" style={{ margin: 0 }}>
             {coverage.data
@@ -1180,6 +1227,40 @@ export function FloorPlanPage() {
               : "measuring…"}
           </span>
         </div>
+      )}
+
+      {/* The predicted layer is a model output, and the one way this feature
+          could actively mislead is by looking like the measured one. It gets
+          a standing banner rather than a legend entry, because a legend is
+          something you consult and a banner is something you can't miss. */}
+      {plan && showPrediction && (
+        <p className={coverage.data?.prediction ? "warning-text" : "page-hint"}>
+          {coverage.data?.prediction ? (
+            <>
+              <strong>Modelled, not measured.</strong> Signal predicted outward from{" "}
+              {coverage.data.prediction.sources.length} placed radio
+              {coverage.data.prediction.sources.length === 1 ? "" : "s"} by path loss over distance.
+              {coverage.data.prediction.sources.some((s) => s.source === "fitted") ? (
+                <>
+                  {" "}
+                  Falloff fitted to your own readings where there were enough of them
+                  {coverage.data.prediction.sources
+                    .filter((s) => s.source === "fitted")
+                    .map((s) => ` (${s.bssid}: ${s.sample_count} readings, R²&nbsp;${s.r_squared?.toFixed(2)})`)
+                    .join("")}
+                  .
+                </>
+              ) : (
+                " Falloff uses generic indoor constants — no access point has enough nearby readings to fit a curve of its own yet."
+              )}{" "}
+              Walls are not modelled, so this is optimistic through masonry.
+            </>
+          ) : apOnPlan.length === 0 ? (
+            "Place an access point in step 4 to predict coverage from it."
+          ) : (
+            "Predicting…"
+          )}
+        </p>
       )}
 
       {plan && (
@@ -1255,6 +1336,32 @@ export function FloorPlanPage() {
                     width: `${cellPercent}%`,
                     height: `${cellPercent}%`,
                     background: signalStrengthColor(cell.rssi),
+                  }}
+                />
+              );
+            })}
+
+          {/* Predicted surface, radiating out from each placed access point.
+              Same signal-strength colours, because green-to-red means the
+              same thing here — but hatched, so at a glance you can tell you
+              are looking at a model rather than at somewhere you stood. */}
+          {showPrediction &&
+            coverage.data?.prediction?.cells.map((cell, i) => {
+              const cellPercent = 100 / (coverage.data?.prediction?.steps ?? 1);
+              return (
+                <div
+                  key={`p${i}`}
+                  className="floorplan-heat-cell is-predicted"
+                  title={`${cell.rssi} dBm predicted — ${cell.distance_m} m from ${cell.bssid}`}
+                  style={{
+                    left: `${(cell.image_x / plan.image_width_px) * 100 - cellPercent / 2}%`,
+                    top: `${(cell.image_y / plan.image_height_px) * 100 - cellPercent / 2}%`,
+                    width: `${cellPercent}%`,
+                    height: `${cellPercent}%`,
+                    // backgroundColor, not the `background` shorthand: the
+                    // shorthand resets background-image, which would erase
+                    // the hatching that marks this as predicted.
+                    backgroundColor: signalStrengthColor(cell.rssi),
                   }}
                 />
               );
