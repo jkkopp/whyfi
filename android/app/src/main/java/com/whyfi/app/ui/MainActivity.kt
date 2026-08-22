@@ -11,10 +11,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -35,11 +37,23 @@ import com.whyfi.app.scan.RadioKind
 import com.whyfi.app.ui.theme.WhyfiTheme
 import kotlinx.coroutines.launch
 
+/** A whyfi-setup:{json} payload waiting on user confirmation before it's
+ * applied — see MainActivity.handleSetupIntent. */
+private data class PendingSetup(val backend: String, val token: String, val name: String)
+
+private const val SETUP_PREFIX = "whyfi-setup:"
+
 class MainActivity : ComponentActivity() {
 
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var favoritesRepository: FavoritesRepository
     private lateinit var missionController: MissionController
+
+    // Set from handleSetupIntent (onCreate/onNewIntent, not a Composable
+    // context), read from setContent's tree below — mutableStateOf still
+    // triggers recomposition for readers regardless of where it's declared;
+    // remember isn't usable here since there's no composition yet.
+    private var pendingSetup by mutableStateOf<PendingSetup?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,9 +66,9 @@ class MainActivity : ComponentActivity() {
         missionController = MissionController(applicationContext, settingsRepository)
 
         // Handle a deep link or shared text containing a whyfi-setup:{json}
-        // payload — auto-configures backend URL + sensor token so the user
-        // doesn't have to type them. Works from a whyfi-setup:// link (web
-        // UI) or a text-share (clipboard paste → share to whyfi).
+        // payload — offers to auto-configure backend URL + sensor token so
+        // the user doesn't have to type them. Works from a whyfi-setup://
+        // link (web UI) or a text-share (clipboard paste → share to whyfi).
         handleSetupIntent(intent)
 
         setContent {
@@ -72,6 +86,24 @@ class MainActivity : ComponentActivity() {
                             themePreference = it
                         },
                     )
+                    // A whyfi-setup link points this device at a new backend
+                    // and hands it a sensor token — applying that silently
+                    // would let anyone who gets a link (or shared text) in
+                    // front of the user repoint the app and exfiltrate scans
+                    // via the swapped token. Requires an explicit tap before
+                    // either value is written.
+                    pendingSetup?.let { pending ->
+                        SetupConfirmationDialog(
+                            pending = pending,
+                            onConfirm = {
+                                settingsRepository.backendUrl = pending.backend
+                                settingsRepository.sensorToken = pending.token
+                                Log.i("MainActivity", "Auto-configured from setup link")
+                                pendingSetup = null
+                            },
+                            onDismiss = { pendingSetup = null },
+                        )
+                    }
                 }
             }
         }
@@ -83,19 +115,23 @@ class MainActivity : ComponentActivity() {
     }
 
     /** Extracts a whyfi-setup:{json} payload from a deep link or shared text
-     * and applies the backend URL + sensor token. The same payload format
-     * the QR code uses (see SettingsScreen's SETUP_QR_PREFIX) — a clickable
-     * link from the web UI or a shared text both work. */
+     * and, if it parses and points at an https backend, stages it as
+     * [pendingSetup] for the confirmation dialog rather than applying it
+     * directly — the same payload format the QR code uses (see
+     * SettingsScreen's SETUP_QR_PREFIX). */
     private fun handleSetupIntent(intent: Intent?) {
         val raw = extractSetupPayload(intent) ?: return
-        if (!raw.startsWith("whyfi-setup:")) return
+        if (!raw.startsWith(SETUP_PREFIX)) return
         runCatching {
-            val payload = org.json.JSONObject(raw.removePrefix("whyfi-setup:"))
+            val payload = org.json.JSONObject(raw.removePrefix(SETUP_PREFIX))
             val backend = payload.getString("backend")
             val token = payload.getString("token")
-            settingsRepository.backendUrl = backend
-            settingsRepository.sensorToken = token
-            Log.i("MainActivity", "Auto-configured from setup link")
+            val name = payload.optString("name", "")
+            if (!backend.startsWith("https://")) {
+                Log.w("MainActivity", "Ignoring setup link with a non-https backend URL")
+                return@runCatching
+            }
+            pendingSetup = PendingSetup(backend, token, name)
         }.onFailure { e ->
             Log.e("MainActivity", "Could not parse setup payload", e)
         }
@@ -105,15 +141,41 @@ class MainActivity : ComponentActivity() {
         intent ?: return null
         // Deep link: whyfi-setup://{json} or whyfi-setup:{json} as data
         val data = intent.dataString
-        if (data != null && data.startsWith("whyfi-setup:")) return data
+        if (data != null && data.startsWith(SETUP_PREFIX)) return data
         // Shared text (SEND intent, text/plain)
         val text = intent.getStringExtra(Intent.EXTRA_TEXT)
-        if (text != null && text.contains("whyfi-setup:")) {
-            return text.substring(text.indexOf("whyfi-setup:"))
+        if (text != null && text.contains(SETUP_PREFIX)) {
+            return text.substring(text.indexOf(SETUP_PREFIX))
         }
         return null
     }
 }
+
+/** Shows the incoming backend URL and a masked token so the user can tell
+ * this is the setup link they expect before it overwrites their current
+ * configuration. */
+@Composable
+private fun SetupConfirmationDialog(pending: PendingSetup, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Apply new backend setup?") },
+        text = {
+            Column {
+                if (pending.name.isNotBlank()) {
+                    Text("Name: ${pending.name}")
+                }
+                Text("Backend: ${pending.backend}")
+                Text("Token: ${maskToken(pending.token)}")
+                Text("This replaces your current backend URL and sensor token.")
+            }
+        },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Apply") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+private fun maskToken(token: String): String =
+    if (token.length <= 8) "•".repeat(token.length) else "${token.take(4)}${"•".repeat(token.length - 8)}${token.takeLast(4)}"
 
 /** Emoji rather than vector icons, matching RadioStatChip — the app has no
  * icon library on the classpath and the radio glyphs here are the same ones
