@@ -285,15 +285,18 @@ class ReadEndpointTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), [{"channel": 6, "ap_count": 1}])
 
-    def test_scan_sessions_list_requires_login_not_sensor_token(self):
-        # A sensor token authenticates ingest (create) only — reading the
-        # session list is a human/browser action requiring a login session.
-        # GET only recognizes SessionAuthentication, so a bearer token here
-        # is simply not understood -> treated as anonymous -> 403.
+    def test_scan_sessions_list_accepts_login_or_own_sensor_token(self):
+        # Both a login session (the PWA) and a sensor token (the Android app,
+        # backfilling its Dashboard on a fresh install — see
+        # LatestScanFetcher) can read the list; a sensor token scopes the
+        # result to that sensor's own sessions (see get_queryset).
         sensor_client = APIClient()
         sensor_client.credentials(HTTP_AUTHORIZATION=f"Token {self.sensor.token}")
         response = sensor_client.get("/api/v1/scan-sessions/")
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        session = response.json()["results"][0]
+        self.assertEqual(session["location_accuracy_meters"], 8.0)
+        self.assertEqual(session["location_provider"], "gps")
 
         response = self.client.get("/api/v1/scan-sessions/")
         self.assertEqual(response.status_code, 200)
@@ -1776,7 +1779,7 @@ class MissionWifiObservationsTests(TestCase):
         return client.get(f"/api/v1/mission/wifi-observations/?{qs}")
 
     def test_sensor_token_is_required_not_session(self):
-        # The reverse of ReadEndpointTests.test_scan_sessions_list_requires_login_not_sensor_token —
+        # Unlike ReadEndpointTests.test_scan_sessions_list_accepts_login_or_own_sensor_token —
         # this endpoint is machine-to-machine, a real logged-in session must
         # NOT work here. 401 (not 403): SensorTokenAuthentication is
         # TokenAuthentication-based, which sets a WWW-Authenticate header,
