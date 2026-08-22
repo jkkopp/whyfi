@@ -643,6 +643,68 @@ discard every scan forever. Sizes come from
 `LENGTH()` on TEXT counts characters, not bytes. No Room schema change, so no
 version bump.
 
+## Tab navigation: HorizontalPager (experimental API, opt-in)
+
+The four main tabs (Dashboard/Scan/LAN/Settings) use
+`HorizontalPager` from `androidx.compose.foundation.pager` for swipe-between-tabs.
+In Compose BOM 2024.06.00 (foundation 1.6.8) this API is still
+`@ExperimentalFoundationApi` — `WhyfiApp` carries `@OptIn(ExperimentalFoundationApi::class)`
+rather than waiting for a stable annotation, since the pager is the standard
+Compose approach and the API surface (`HorizontalPager`, `rememberPagerState`,
+`animateScrollToPage`) hasn't changed between 1.6 and 1.7. When the BOM is
+bumped past foundation 1.7 (where the API stabilised), the opt-in can be removed.
+
+The pager wraps only the four tab screens. Drill-downs (ScanDetailScreen,
+MissionScreen) early-return above the pager, so swipe never reaches them —
+the system back button closes those via their existing `BackHandler`s. This is
+load-bearing: a swipe that switched tabs while a detail screen was open would
+feel like the back button broke.
+
+Bidirectional sync between `pagerState.currentPage` and `selectedTab` uses two
+`LaunchedEffect`s (one per direction) rather than `derivedStateOf` or a single
+observer, because each side needs to call `animateScrollToPage` (tab tap) or
+write `selectedTab` (swipe) — the write direction differs, so collapsing them
+into one observer risks feedback loops.
+
+## Button label shortening on Scan tab
+
+"Scan once" and "Start continuous scanning" were stacked vertically as
+full-width buttons. They now share a row at equal width (`Modifier.weight(1f)`).
+Labels were shortened to "Scan once" / "Start" (idle) and "Scan once" / "Stop"
+(running) — "Throttled" replaces the longer "Scan throttled — try again shortly"
+when the WiFi throttle is active. The original labels would overflow a
+half-width button on narrow screens. The `enabled` and `onClick` logic is
+unchanged.
+
+## In-app sensor enable: what can and can't be turned on without leaving the app
+
+The Scan tab shows a one-tap enable button below each radio's "turned off"
+unavailable-reason message. The enable paths differ per radio because Android
+restricts which settings a normal app can change:
+
+- **Bluetooth** — CAN enable in-app. `BluetoothAdapter.ACTION_REQUEST_ENABLE`
+  via `ActivityResultContracts.StartActivityForResult()` shows a system dialog
+  overlay ("Allow whyfi to turn on Bluetooth?"); the app stays visible. The
+  existing 2-second availability polling loop picks up the new state
+  automatically — no manual refresh needed.
+- **WiFi** — CANNOT enable in-app on API 29+. `WifiManager.setWifiEnabled()`
+  is restricted to system apps on Android 10+; calling it from a normal app
+  throws. The button opens `Settings.ACTION_WIFI_SETTINGS` (API 29+) or
+  `Settings.ACTION_WIRELESS_SETTINGS` (older), which leaves the app briefly
+  and returns on back. Don't try `setWifiEnabled()` — it will crash.
+- **GPS/Location** — CANNOT enable in-app. The button opens
+  `Settings.ACTION_LOCATION_SOURCE_SETTINGS`. Same leave-and-return pattern.
+- **Cellular (airplane mode)** — CANNOT toggle in-app on modern Android.
+  The button opens `Settings.ACTION_AIRPLANE_MODE_SETTINGS`.
+
+The Bluetooth launcher is registered unconditionally at the top of
+`ScanScreen` (launchers cannot live inside conditionals). The "no hardware"
+unavailable reasons ("This device has no Bluetooth adapter", "This device
+has no GPS hardware") intentionally show no button — there's nothing to
+enable. `PermissionHelper.isBluetoothEnabled()` and `isWifiEnabled()` were
+added alongside the existing `isLocationServicesEnabled()` as the central
+place for sensor-state checks.
+
 ## Open/deferred (v-next, not forgotten, just not now)
 
 - Matter/Thread device discovery (via BLE commissioning adverts + mDNS) —
@@ -656,4 +718,102 @@ version bump.
   on the viewing device).
 - Watching a *specific* WiFi/BLE/LAN device for online/offline transitions.
   Remote scanning control is a reasonable foundation, but it needs its own
-  watch-list model and a per-device "seen recently" notion.
+  watch-list model and a per-device "seen during this scan" notion.
+
+## mockloc: dev-only emulator GPS/RSSI spoofing tool
+
+`mockloc/` is a standalone dev-only Android app (Java, not Kotlin) for
+testing the scanner on an Android emulator without a physical device. It
+spoofs GPS via `LocationManager.addTestProvider()` along a configurable
+walk path (circle/oval/rectangle, live-adjustable) and models a
+directional RSSI antenna pattern (36-sector smoothed, per-session) exposed
+over a local HTTP server on port 8080.
+
+**Why standalone, not part of the main app:** it's a dev tool, not a
+feature. Keeping it separate means the main APK ships no mock-location
+code, no `ACCESS_MOCK_LOCATION` permission (which AGP rejects in release
+builds anyway — it lives in `mockloc/app/src/debug/AndroidManifest.xml`),
+and no test-provider registration that could accidentally ship to a real
+device. It's built on demand via the Gradle Docker image, not part of
+docker-compose or the APK distribution.
+
+**Why the RSSI is HTTP-only:** Android has no "test WiFi provider" API —
+the emulator's WiFi HAL always returns "AndroidWifi" at a fixed -50 dBm.
+mockloc can only *compute* synthetic RSSI; it cannot inject it into the
+emulator's scan results. The HTTP server is the bridge: whyfi can read it
+from a debug hook to overlay synthetic signal data on its own scans.
+**Wiring that into whyfi's scan path is a separate, not-yet-done task** —
+the model and server exist, the integration does not.
+
+**The `addTestProvider` powerRequirement gotcha:** the 9th arg to
+`addTestProvider` is `powerRequirement`, which must be 1-3 (Criteria
+constants), NOT 0. Passing 0 throws `IllegalArgumentException: powerUsage
+is out of range of [1, 3] (too low)`. The 10th arg is `accuracy`, also
+1-3. This bit us during initial bring-up — don't reintroduce it.
+
+## Local dev APK signing: persistent keystore
+
+When testing the Android app on a physical device or emulator, always
+sign with the **persistent debug keystore** at `~/.android/whyfi-debug.keystore`
+(alias `whyfi-debug`, password `android`), NOT an ad-hoc `/tmp/debug.keystore`.
+A stable signature means `adb install -r` updates the app in place,
+preserving the user's backend URL + sensor token settings. A signature
+mismatch forces an uninstall, which wipes those settings — frustrating
+for the user who has to reconfigure every time.
+
+Sign command:
+```bash
+apksigner sign --ks ~/.android/whyfi-debug.keystore --ks-pass pass:android \
+  --ks-key-alias whyfi-debug --key-pass pass:android \
+  --out app-signed.apk app-aligned.apk
+```
+The keystore was generated once and lives outside the repo (it's a dev
+credential, not committed). If it's ever regenerated, every installed
+copy needs one final reinstall before updates work again.
+
+## Favorites sort and mission chip remove
+
+Scan detail tables sort favorited rows to the top via a stable
+`sortedByDescending { it.isFavorite }` on the already-mapped `DataTableRow`
+list — the sort runs *after* `ScanDiff.rowsFor` returns (so signal order
+within each group is preserved) but *before* the rows are passed to
+`DataTable`. This is deliberately a post-map sort rather than changing
+`ScanDiff` itself: `ScanDiff.rowsFor` is shared and its sort order
+(serving-cell-first for cellular, signal-descending for WiFi/BLE) is
+load-bearing for the diff/summary logic, not just display.
+
+Mission view's favorite `FilterChip`s carry a `trailingIcon` with a "x"
+text that's a separate clickable tap target from the chip's own
+`onClick`. Tapping the x calls `favoritesRepository.toggleFavorite` to
+unfavorite, and if the removed favorite was the currently-selected
+target, also calls `missionController.clearSelection()` so the map
+doesn't keep showing stale data for something no longer tracked. Used
+`Text("x")` rather than `Icons.Filled.Close` to avoid pulling in the
+`material-icons-extended` dependency — the codebase had no prior Icon
+usage and the text glyph is sufficient for a chip remove control.
+## Dashboard backfill from backend on fresh install
+
+When `LastScanStore` has no local scan (fresh install, cleared file), and
+the app is configured (backend URL + token set), `ScanForegroundService.onCreate`
+fetches the latest scan session from the backend via `LatestScanFetcher`:
+`GET /api/v1/scan-sessions/?limit=1` for the session summary, then the
+per-radio detail endpoints (`wifi-observations/`, `cell-observations/`, etc.)
+for the observations. The observations are mapped back from the read-serializer
+DTOs to the ingest-serializer DTOs (`ScanSessionUploadRequest`) so the existing
+display pipeline (ScanDiff, RadioFormat, DashboardScreen) works unchanged.
+
+The reconstructed pass is **display-only**: it is never written to
+`LastScanStore` (that file is for locally-scanned passes only) and never
+enters the upload outbox (it already exists on the backend). The
+`client_scan_id` is set to the backend session's UUID for traceability.
+`completedScanCount` is set to 1 (we don't know the real count, just that
+there was at least one). The pass is ephemeral — it lives in `ScanUiState`
+until a real local scan replaces it. Re-fetching on every cold start is
+cheap and keeps the Dashboard fresh.
+
+This required adding `SensorTokenAuthentication` as an additional
+authenticator for the scan-session list/retrieve/detail actions in
+`ScanSessionViewSet.get_authenticators()` (session auth still works for
+the PWA; both are tried in order). The queryset is scoped to the
+sensor's own sessions when a sensor token is used, so a device only sees
+its own scans.

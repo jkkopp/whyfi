@@ -2,8 +2,11 @@ package com.whyfi.app.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -12,6 +15,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -40,24 +44,34 @@ fun RadioStatChip(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
 ) {
+    // Fixed height so all chips in a row align regardless of whether they
+    // show a count, a spinner, or a dash — and so the row doesn't reflow
+    // when a phase starts/stops and swaps count↔spinner. The icon sits at
+    // top, the count/spinner in a fixed-height centered slot, the label
+    // at the bottom; the outer Column fills the fixed height so every chip
+    // in the row is exactly the same size.
     Column(
         modifier = modifier
+            .fillMaxWidth()
+            .height(96.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(accentColor.copy(alpha = 0.12f))
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(icon, fontSize = 18.sp)
-        Spacer(Modifier.height(4.dp))
-        when {
-            isActivePhase -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = accentColor)
-            count != null -> Text(
-                count.toString(),
-                style = MaterialTheme.typography.titleLarge,
-                color = accentColor,
-                fontWeight = FontWeight.Bold,
-            )
-            else -> Text("—", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box(modifier = Modifier.height(28.dp), contentAlignment = Alignment.Center) {
+            when {
+                isActivePhase -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = accentColor)
+                count != null -> Text(
+                    count.toString(),
+                    style = MaterialTheme.typography.titleLarge,
+                    color = accentColor,
+                    fontWeight = FontWeight.Bold,
+                )
+                else -> Text("—", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }

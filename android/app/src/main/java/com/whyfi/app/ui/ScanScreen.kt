@@ -1,5 +1,10 @@
 package com.whyfi.app.ui
 
+import android.bluetooth.BluetoothAdapter
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.rememberScrollState
@@ -8,6 +13,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -88,6 +94,15 @@ fun ScanScreen(
         permissionsGranted = PermissionHelper.hasAllRequiredPermissions(context)
     }
 
+    // Bluetooth can be enabled in-app via ACTION_REQUEST_ENABLE — the system
+    // shows a dialog overlay ("Allow whyfi to turn on Bluetooth?") and the app
+    // stays visible. Must be registered unconditionally (launchers cannot live
+    // inside conditionals). After the result returns, the 2-second polling
+    // loop below picks up the new adapter state automatically.
+    val bluetoothEnableLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { /* re-check happens via the availability polling loop */ }
+
     LaunchedEffect(Unit) {
         if (!permissionsGranted) {
             permissionLauncher.launch(PermissionHelper.requiredRuntimePermissions())
@@ -142,24 +157,31 @@ fun ScanScreen(
         } else if (uiState.completedScanCount > 0) {
             Text("Last scan:")
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
             RadioStatChip(
                 "📶", "WiFi", uiState.wifiCount, scanning && uiState.currentPhase == ScanPhase.WIFI, Color(0xFF2DD4BF),
+                modifier = Modifier.weight(1f),
                 onClick = if (openable) ({ onOpenDetail(RadioKind.WIFI) }) else null,
             )
             RadioStatChip(
                 "📡", "Cellular", uiState.cellularCount, scanning && uiState.currentPhase == ScanPhase.CELLULAR, Color(0xFF60A5FA),
+                modifier = Modifier.weight(1f),
                 onClick = if (openable) ({ onOpenDetail(RadioKind.CELLULAR) }) else null,
             )
             RadioStatChip(
                 "🔵", "BLE", uiState.bleCount, scanning && uiState.currentPhase == ScanPhase.BLE, Color(0xFFA78BFA),
+                modifier = Modifier.weight(1f),
                 onClick = if (openable) ({ onOpenDetail(RadioKind.BLE) }) else null,
             )
             RadioStatChip(
                 "🛰️", "GPS", uiState.satelliteCount, scanning && uiState.currentPhase == ScanPhase.GNSS, Color(0xFFFBBF24),
+                modifier = Modifier.weight(1f),
                 onClick = if (openable) ({ onOpenDetail(RadioKind.SATELLITE) }) else null,
             )
-            RadioStatChip("🎯", "Mission", null, missionState.isTracking, Color(0xFFF472B6), onClick = onOpenMission)
+            RadioStatChip("🎯", "Mission", null, missionState.isTracking, Color(0xFFF472B6), modifier = Modifier.weight(1f), onClick = onOpenMission)
         }
         if (openable) {
             Text(
@@ -187,6 +209,17 @@ fun ScanScreen(
         }
         if (includeWifi && uiState.wifiUnavailableReason != null) {
             Text("${uiState.wifiUnavailableReason} WiFi results will be empty until this is resolved.")
+            // WiFi cannot be enabled in-app on API 29+ — setWifiEnabled is
+            // restricted to system apps. Open the system WiFi settings
+            // instead; the user returns on back.
+            Button(onClick = {
+                val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                    Intent(Settings.ACTION_WIFI_SETTINGS) else
+                    Intent(Settings.ACTION_WIRELESS_SETTINGS)
+                runCatching { context.startActivity(intent) }
+            }) {
+                Text("Open WiFi settings")
+            }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = includeCellular, onCheckedChange = { includeCellular = it }, enabled = !uiState.isContinuous)
@@ -194,6 +227,13 @@ fun ScanScreen(
         }
         if (includeCellular && uiState.cellularUnavailableReason != null) {
             Text("${uiState.cellularUnavailableReason} Cellular results will be empty until this is resolved.")
+            // Airplane mode cannot be toggled in-app on modern Android.
+            // Open the system airplane-mode settings page.
+            Button(onClick = {
+                runCatching { context.startActivity(Intent(Settings.ACTION_AIRPLANE_MODE_SETTINGS)) }
+            }) {
+                Text("Open airplane mode settings")
+            }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = includeBle, onCheckedChange = { includeBle = it }, enabled = !uiState.isContinuous)
@@ -201,6 +241,22 @@ fun ScanScreen(
         }
         if (includeBle && uiState.bleUnavailableReason != null) {
             Text("${uiState.bleUnavailableReason} BLE results will be empty until this is resolved.")
+            // Turn Bluetooth on via the system "Allow whyfi to turn on
+            // Bluetooth?" dialog (ACTION_REQUEST_ENABLE). This works without
+            // BLUETOOTH_CONNECT runtime permission — the system handles the
+            // enable. The dialog stays in-app (doesn't leave to settings).
+            // "This device has no Bluetooth adapter" has no button.
+            if (uiState.bleUnavailableReason == "Bluetooth is turned off.") {
+                Button(onClick = {
+                    runCatching {
+                        bluetoothEnableLauncher.launch(
+                            Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+                        )
+                    }
+                }) {
+                    Text("Turn on Bluetooth")
+                }
+            }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = includeGnss, onCheckedChange = { includeGnss = it }, enabled = !uiState.isContinuous)
@@ -208,38 +264,58 @@ fun ScanScreen(
         }
         if (includeGnss && uiState.gnssUnavailableReason != null) {
             Text("${uiState.gnssUnavailableReason} Satellite results will be empty until this is resolved.")
+            // Location services cannot be enabled in-app — open the system
+            // location settings page. "This device has no GPS hardware" has
+            // no button because there's nothing to enable.
+            if (uiState.gnssUnavailableReason == "Location services (GPS) are off.") {
+                Button(onClick = {
+                    runCatching { context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
+                }) {
+                    Text("Open location settings")
+                }
+            }
         }
 
-        Button(
-            enabled = canScanNow() && !uiState.isScanning && !uiState.isContinuous,
-            onClick = {
-                locationServicesOn = PermissionHelper.isLocationServicesEnabled(context)
-                ScanForegroundService.start(context)
-                service?.scanOnce(scanOptions())
-            },
+        // Side-by-side rather than stacked: the two primary actions share one
+        // row at equal width. Labels are shortened so both states (idle and
+        // continuous-running) fit without truncation on narrow screens.
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(if (canScanNow()) "Scan once" else "Scan throttled — try again shortly")
-        }
-
-        Button(
-            enabled = permissionsGranted && service != null && !uiState.isScanning,
-            onClick = {
-                if (uiState.isContinuous) {
-                    // Doubles as the local kill switch while remote control is
-                    // on: whoever is physically holding the phone wins.
-                    if (remoteControlOn) {
-                        service?.setRemoteControlEnabled(false)
-                        remoteControlOn = false
-                    }
-                    service?.stopContinuous()
-                } else {
+            Button(
+                enabled = canScanNow() && !uiState.isScanning && !uiState.isContinuous,
+                modifier = Modifier.weight(1f),
+                onClick = {
                     locationServicesOn = PermissionHelper.isLocationServicesEnabled(context)
                     ScanForegroundService.start(context)
-                    service?.startContinuous(scanOptions(), CONTINUOUS_SCAN_INTERVAL_MS)
-                }
-            },
-        ) {
-            Text(if (uiState.isContinuous) "Stop continuous scanning" else "Start continuous scanning")
+                    service?.scanOnce(scanOptions())
+                },
+            ) {
+                Text(if (canScanNow()) "Scan once" else "Throttled")
+            }
+
+            Button(
+                enabled = permissionsGranted && service != null && !uiState.isScanning,
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    if (uiState.isContinuous) {
+                        // Doubles as the local kill switch while remote control is
+                        // on: whoever is physically holding the phone wins.
+                        if (remoteControlOn) {
+                            service?.setRemoteControlEnabled(false)
+                            remoteControlOn = false
+                        }
+                        service?.stopContinuous()
+                    } else {
+                        locationServicesOn = PermissionHelper.isLocationServicesEnabled(context)
+                        ScanForegroundService.start(context)
+                        service?.startContinuous(scanOptions(), CONTINUOUS_SCAN_INTERVAL_MS)
+                    }
+                },
+            ) {
+                Text(if (uiState.isContinuous) "Stop" else "Start")
+            }
         }
 
         if (uiState.isContinuous) {

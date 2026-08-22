@@ -1,6 +1,5 @@
 package com.whyfi.app.ui
 
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -63,7 +62,11 @@ fun DashboardScreen(
     ) {
         Text("Dashboard", style = MaterialTheme.typography.headlineSmall)
 
-        if (!survey.hasData) {
+        // survey.hasData tracks the session-scoped tally (passCount), which
+        // stays 0 when the Dashboard is backfilled from the backend rather
+        // than from a local scan. Also check latestPass so a backfilled
+        // Dashboard isn't blank even though the survey tally is empty.
+        if (!survey.hasData && uiState.latestPass == null) {
             Text(
                 "Nothing scanned yet. Run a scan on the Scan tab and everything this phone " +
                     "hears will be totalled up here.",
@@ -87,24 +90,28 @@ fun DashboardScreen(
 
         Text("Unique devices heard", style = MaterialTheme.typography.titleMedium)
         Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             val openable = uiState.latestPass != null
             RadioStatChip(
                 "📶", "WiFi", survey.uniqueWifi, false, WIFI_COLOR,
+                modifier = Modifier.weight(1f),
                 onClick = if (openable) ({ onOpenDetail(RadioKind.WIFI) }) else null,
             )
             RadioStatChip(
                 "📡", "Towers", survey.uniqueCellular, false, CELL_COLOR,
+                modifier = Modifier.weight(1f),
                 onClick = if (openable) ({ onOpenDetail(RadioKind.CELLULAR) }) else null,
             )
             RadioStatChip(
                 "🔵", "BLE", survey.uniqueBle, false, BLE_COLOR,
+                modifier = Modifier.weight(1f),
                 onClick = if (openable) ({ onOpenDetail(RadioKind.BLE) }) else null,
             )
             RadioStatChip(
                 "🛰️", "GPS", survey.uniqueSatellites, false, SAT_COLOR,
+                modifier = Modifier.weight(1f),
                 onClick = if (openable) ({ onOpenDetail(RadioKind.SATELLITE) }) else null,
             )
             // Not tied to uiState.latestPass like the radio chips above —
@@ -117,6 +124,7 @@ fun DashboardScreen(
             val missionState by missionController.uiState.collectAsState()
             RadioStatChip(
                 "🎯", "Mission", null, missionState.isTracking, MISSION_COLOR,
+                modifier = Modifier.weight(1f),
                 onClick = onOpenMission,
             )
         }
