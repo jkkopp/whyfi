@@ -40,3 +40,7 @@ npm-debug.log*
 
 # Zealot agent worktrees
 .zealotcode/
+
+# Local agent/session tooling
+.claude/
+.pi-sessions/

@@ -11,7 +11,7 @@ import { SimpleLineChart } from "../components/SimpleLineChart";
 import { COVERAGE_STROKE_COLOR, classifyDeviceCoverage, soloShapes } from "../coverageConfig";
 import { useFilter } from "../context/FilterContext";
 import { resolveCurrentScan } from "../currentScan";
-import { weightedCentroid } from "../geo";
+import { getEstimatorPreference } from "../estimatorPreference";
 import { useDeleteScanSession } from "../hooks/useDeleteScanSession";
 import {
   describeObservedSpan,
@@ -39,6 +39,16 @@ export function NetworkDetailPage() {
   const { printing, onMapReady, printButtonProps } = useReportPrinting();
 
   const ap = usePolling(() => api.accessPoint(bssid), 20000, [bssid], { paused: printing });
+  // The estimated position comes from the backend rather than being computed
+  // here, so every surface agrees on what the marker means and only one
+  // implementation of each algorithm exists (backend/scans/estimators.py).
+  const estimator = getEstimatorPreference();
+  const position = usePolling(
+    () => api.accessPointPosition(bssid, { since, until, sessionLimit, estimator }),
+    20000,
+    [bssid, since, until, sessionLimit, estimator],
+    { paused: printing },
+  );
   const observations = usePolling(
     () => api.wifiObservationsForAp(bssid, { since, until, sessionLimit }),
     20000,
@@ -127,9 +137,13 @@ export function NetworkDetailPage() {
   // just the slider-visible readings) — Solo mode uses this as a stable
   // cone apex regardless of which scan you're scrubbed to, so "where the
   // AP is" doesn't jump around as you move the slider.
+  // Server-computed under the user's chosen estimator (see
+  // estimatorPreference.ts), from this device's *entire* sighting history
+  // rather than the slider-visible readings — Solo mode uses it as a stable
+  // cone apex, so "where it is" doesn't jump as you scrub the slider.
   const apEstimatedLocation =
-    geotagged.length > 0
-      ? weightedCentroid(geotagged.map((o) => ({ lat: o.latitude as number, lng: o.longitude as number, weight: o.rssi })))
+    position.data?.lat != null && position.data?.lng != null
+      ? { lat: position.data.lat, lng: position.data.lng }
       : null;
 
   // Solo mode: a cone from the AP's known position to this one reading

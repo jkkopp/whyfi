@@ -201,3 +201,20 @@ local iteration, keep the production path as "build into the backend image."
   ever existed for it, only tap-while-app-happens-to-be-open, and rather
   than build it a proper UI the call was to cut it. Don't re-add without an
   explicit new ask.
+
+## AP Localization
+
+The design and functional requirements for Wi-Fi AP localization are defined in:
+
+docs/ap-localization-design.md
+
+Read this document before making architectural or implementation decisions
+related to Wi-Fi scanning, FTM/RTT, localization, mesh AP detection, heatmaps
+or measurement reporting.
+
+Preserve raw measurements separately from derived estimates.
+
+Do not assume that a BSSID uniquely represents one physical AP.
+
+Implement the project incrementally according to the development priorities
+defined in the design document.

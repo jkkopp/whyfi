@@ -9,12 +9,26 @@ import type {
   CellObservation,
   CellTower,
   ChannelCongestionPoint,
+  CalibrationFit,
+  CalibrationState,
   CrashReport,
+  DevicePosition,
+  ExportBundle,
+  FloorPlan,
+  FloorPlanCoverage,
+  NearbySsid,
+  FtmPosition,
+  GroundTruthPosition,
+  ImportResult,
+  LocalizationBenchmark,
   HeatmapPoint,
   HeatmapSource,
   LANDevice,
   LANObservation,
+  MeshHypothesis,
   Paginated,
+  PositionComparison,
+  ProbabilityGrid,
   RadioCoverage,
   SatelliteObservation,
   ScanSession,
@@ -117,6 +131,23 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
       ...(csrfToken ? { "X-CSRFToken": csrfToken } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
+  });
+  if (response.status === 401) throw new UnauthorizedError(`Not logged in for ${path}`);
+  if (!response.ok) throw new ApiError(response.status, await parseErrorBody(response), path);
+  return response.json() as Promise<T>;
+}
+
+/** Multipart POST, for the one endpoint that takes a file (floor-plan
+ * upload). Deliberately does NOT set Content-Type — the browser has to
+ * generate the multipart boundary itself, and setting it by hand produces a
+ * body Django can't parse. */
+async function postForm<T>(path: string, form: FormData): Promise<T> {
+  const csrfToken = getCsrfToken();
+  const response = await fetch(`${baseUrl()}${path}`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { ...(csrfToken ? { "X-CSRFToken": csrfToken } : {}) },
+    body: form,
   });
   if (response.status === 401) throw new UnauthorizedError(`Not logged in for ${path}`);
   if (!response.ok) throw new ApiError(response.status, await parseErrorBody(response), path);
@@ -241,12 +272,33 @@ function windowQuery(opts: {
   until?: string;
   sessionLimit?: number;
   area?: FocusArea | null;
+  estimator?: string;
+  use_ground_truth?: string;
 }): string {
   const parts = sinceUntilParts(opts);
   if (opts.area) {
     parts.push(`area_lat=${opts.area.lat}`, `area_lng=${opts.area.lng}`, `area_radius_m=${Math.round(opts.area.radiusM)}`);
   }
+  // Which estimator produced each result's `estimated_position`. Sent by the
+  // coverage callers so the map's estimated-location markers honour the
+  // user's global setting (see estimatorPreference.ts).
+  if (opts.estimator) parts.push(`estimator=${encodeURIComponent(opts.estimator)}`);
+  // Only ever sent as "0" to opt *out* of pinned observer positions; omitted
+  // means the corrected positions apply (see ground_truth_overrides).
+  if (opts.use_ground_truth) parts.push(`use_ground_truth=${opts.use_ground_truth}`);
   return parts.join("&");
+}
+
+export interface PositionOpts {
+  since?: string;
+  until?: string;
+  sessionLimit?: number;
+  estimator?: string;
+  use_ground_truth?: string;
+}
+
+function positionQuery(opts: PositionOpts): string {
+  return windowQuery(opts);
 }
 
 export const api = {
@@ -286,12 +338,109 @@ export const api = {
   // Coverage/heatmap responses are CappedList envelopes, not bare arrays —
   // read `.results`, and show the user something when `.truncated` is set.
   accessPointsCoverage: (
-    opts: { since?: string; until?: string; sessionLimit?: number; area?: FocusArea | null; ssidExact?: string } = {},
+    opts: { since?: string; until?: string; sessionLimit?: number; area?: FocusArea | null; ssidExact?: string; estimator?: string; use_ground_truth?: string } = {},
   ) =>
     get<CappedList<AccessPointCoverage>>(
       `/access-points/coverage/?${windowQuery(opts)}` +
         `${opts.ssidExact ? `&ssid_exact=${encodeURIComponent(opts.ssidExact)}` : ""}`,
     ),
+
+  // Estimated position of one device under a chosen estimator, or every
+  // estimator side by side (`compare`). See backend/scans/estimators.py.
+  accessPointPosition: (bssid: string, opts: PositionOpts = {}) =>
+    get<DevicePosition>(`/access-points/${encodeURIComponent(bssid)}/position/?${positionQuery(opts)}`),
+  accessPointPositionGrid: (bssid: string, opts: PositionOpts & { gridSteps?: number; gridSpanM?: number } = {}) =>
+    get<DevicePosition & { probability_grid?: ProbabilityGrid | null }>(
+      `/access-points/${encodeURIComponent(bssid)}/position/?include_grid=1&${positionQuery(opts)}` +
+        `${opts.gridSteps ? `&grid_steps=${opts.gridSteps}` : ""}${opts.gridSpanM ? `&grid_span_m=${opts.gridSpanM}` : ""}`,
+    ),
+  accessPointPositionComparison: (bssid: string, opts: PositionOpts = {}) =>
+    get<PositionComparison>(`/access-points/${encodeURIComponent(bssid)}/position/?compare=1&${positionQuery(opts)}`),
+  cellTowerPosition: (towerKey: string, opts: PositionOpts = {}) =>
+    get<DevicePosition>(`/cell-towers/${encodeURIComponent(towerKey)}/position/?${positionQuery(opts)}`),
+  bleDevicePosition: (deviceKey: string, opts: PositionOpts = {}) =>
+    get<DevicePosition>(`/ble-devices/${encodeURIComponent(deviceKey)}/position/?${positionQuery(opts)}`),
+
+  // AP localization (ap-localization-design.md V4-V8). The probability grid
+  // is opt-in because it's by far the biggest part of the payload — a 25x25
+  // grid is 625 cells, and nothing needs it unless the heatmap is on screen.
+  ftmPosition: (bssid: string, opts: { includeGrid?: boolean; gridSteps?: number; gridSpanM?: number } = {}) =>
+    get<FtmPosition>(
+      `/access-points/${encodeURIComponent(bssid)}/ftm-position/?` +
+        `${opts.includeGrid ? "include_grid=1" : ""}` +
+        `${opts.gridSteps ? `&grid_steps=${opts.gridSteps}` : ""}` +
+        `${opts.gridSpanM ? `&grid_span_m=${opts.gridSpanM}` : ""}`,
+    ),
+  meshGroups: (opts: { since?: string; until?: string; sessionLimit?: number; ssidExact?: string } = {}) =>
+    get<CappedList<MeshHypothesis>>(
+      `/access-points/mesh-groups/?${windowQuery(opts)}` +
+        `${opts.ssidExact ? `&ssid_exact=${encodeURIComponent(opts.ssidExact)}` : ""}`,
+    ),
+
+  floorPlans: () => get<Paginated<FloorPlan>>("/floor-plans/"),
+  uploadFloorPlan: (form: FormData) => postForm<FloorPlan>("/floor-plans/", form),
+  deleteFloorPlan: (id: number) => del<void>(`/floor-plans/${id}/`),
+  calibrateFloorPlan: (id: number, anchors: Record<string, number>) =>
+    post<FloorPlan>(`/floor-plans/${id}/calibrate/`, anchors),
+  resetFloorPlanCalibration: (id: number) => post<FloorPlan>(`/floor-plans/${id}/reset-calibration/`),
+  adjustFloorPlan: (id: number, patch: { bearing_deg?: number; meters_per_pixel?: number }) =>
+    post<FloorPlan>(`/floor-plans/${id}/adjust/`, patch),
+  /** Stores the traced building footprint. Points are either image pixels
+   * ({x, y}, traced on the plan drawing) or real coordinates ({lat, lng},
+   * traced on the map) — the backend converts the latter, so the transform
+   * has one implementation and the stored form is always pixels. An empty
+   * array clears it, reverting to the image's own rectangle. */
+  saveFloorPlanOutline: (
+    id: number,
+    points: { x: number; y: number }[] | { lat: number; lng: number }[],
+  ) => post<FloorPlan>(`/floor-plans/${id}/outline/`, { points }),
+  floorPlanNearbySsids: (id: number, radiusM = 150) =>
+    get<{ radius_m: number; results: NearbySsid[] }>(`/floor-plans/${id}/nearby-ssids/?radius_m=${radiusM}`),
+  floorPlanCoverage: (
+    id: number,
+    ssids: string[],
+    weakThresholdDbm: number,
+    opts: { includeHeatmap?: boolean; includePrediction?: boolean; heatmapSteps?: number } = {},
+  ) =>
+    get<FloorPlanCoverage>(
+      `/floor-plans/${id}/coverage/?` +
+        ssids.map((s) => `ssid_exact=${encodeURIComponent(s)}`).join("&") +
+        `&weak_threshold_dbm=${weakThresholdDbm}` +
+        `${opts.includeHeatmap ? "&include_heatmap=1" : ""}` +
+        `${opts.includePrediction ? "&include_prediction=1" : ""}` +
+        `${opts.heatmapSteps ? `&heatmap_steps=${opts.heatmapSteps}` : ""}`,
+    ),
+
+  groundTruth: (params = "") => get<Paginated<GroundTruthPosition>>(`/ground-truth/${params}`),
+  // Either an explicit lat/lng (map click) or floor-plan pixel coordinates,
+  // in which case the backend derives the real position — see
+  // GroundTruthViewSet.create.
+  saveGroundTruth: (pin: {
+    kind: "AP" | "OBSERVER";
+    target_key: string;
+    latitude?: number;
+    longitude?: number;
+    label?: string;
+    note?: string;
+    floor_plan?: number;
+    image_x?: number;
+    image_y?: number;
+  }) => post<GroundTruthPosition>("/ground-truth/", pin),
+  deleteGroundTruth: (id: number) => del<void>(`/ground-truth/${id}/`),
+
+  localizationBenchmark: () => get<LocalizationBenchmark>("/localization/benchmark/"),
+  calibration: () => get<CalibrationState>("/calibration/"),
+  fitCalibration: (activate: boolean) =>
+    post<{ fit: CalibrationFit }>("/calibration/", { radio_kind: "wifi", activate }),
+  setCalibrationActive: (isActive: boolean) =>
+    post<{ is_active: boolean }>("/calibration/activate/", { radio_kind: "wifi", is_active: isActive }),
+
+  exportScanSessions: (opts: { since?: string; until?: string; sessionLimit?: number; ssidExact?: string } = {}) =>
+    get<ExportBundle>(
+      `/scan-sessions/export/?${windowQuery(opts)}` +
+        `${opts.ssidExact ? `&ssid_exact=${encodeURIComponent(opts.ssidExact)}` : ""}`,
+    ),
+  importScanSessions: (bundle: unknown) => post<ImportResult>("/scan-sessions/import_sessions/", bundle),
 
   channelCongestion: (band: string, opts: { since?: string; until?: string; sessionLimit?: number } = {}) =>
     get<ChannelCongestionPoint[]>(
@@ -310,12 +459,12 @@ export const api = {
       `/cell-towers/${encodeURIComponent(towerKey)}/cell-observations/?limit=${opts.limit ?? 200}` +
         sinceUntilQuery(opts),
     ),
-  cellTowersCoverage: (opts: { since?: string; until?: string; sessionLimit?: number; area?: FocusArea | null } = {}) =>
+  cellTowersCoverage: (opts: { since?: string; until?: string; sessionLimit?: number; area?: FocusArea | null; estimator?: string } = {}) =>
     get<CappedList<RadioCoverage>>(`/cell-towers/coverage/?${windowQuery(opts)}`),
 
   bleObservations: (query = "") => get<Paginated<BLEObservation>>(`/ble-observations/${query}`),
   bleObservationsCoverage: (
-    opts: { since?: string; until?: string; sessionLimit?: number; area?: FocusArea | null } = {},
+    opts: { since?: string; until?: string; sessionLimit?: number; area?: FocusArea | null; estimator?: string } = {},
   ) => get<CappedList<RadioCoverage>>(`/ble-observations/coverage/?${windowQuery(opts)}`),
 
   bleDevices: (query = "") => get<Paginated<BLEDevice>>(`/ble-devices/${query}`),

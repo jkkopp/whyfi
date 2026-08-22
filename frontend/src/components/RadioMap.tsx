@@ -10,12 +10,24 @@ import type { MapIconType } from "../mapIcons";
 // Self-hosting a tile server was deliberately scoped out of v1 — see
 // docs/architecture.md and MEMORY.md for the tradeoff.
 const TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+// Last-resort centre, used only when the caller supplies no initialCenter
+// *and* there's no data to fit bounds to. Previously this was the only
+// behaviour, which left an empty map (the floor-plan calibration map, say)
+// sitting over a city the user has no connection to.
 const DEFAULT_CENTER: [number, number] = [48.1351, 11.582];
 
 // The backend buckets coverage points to ~1.1m precision (5 decimal
 // places) — that's too small to see on a map, so cells are drawn at a
 // fixed, visible base size instead of literally to-scale.
 const GRID_CELL_METERS = 8;
+
+// How far auto-fit is allowed to zoom in. Only binds when the data is small
+// enough that fitting it would otherwise go closer — a tour across a county
+// picks its own low zoom regardless. It used to be 17, which is street level:
+// fitting a single building's footprint (the floor-plan alignment map) left
+// the house as a speck in the middle with no way to judge whether the plan
+// lined up with it, which is the entire purpose of that view.
+const FIT_MAX_ZOOM = 20;
 
 export interface CoveragePolygon {
   points: { lat: number; lng: number }[];
@@ -50,6 +62,13 @@ export interface CoveragePolygon {
   // isn't set — Solo blobs want to be more visible than that, since the
   // color is the only signal-strength cue they carry.
   fillOpacity?: number;
+  // Draws a hard, unblurred outline. Every polygon here is feathered by
+  // default (.coverage-soft) because the usual subject is an estimated radio
+  // field, where a crisp boundary would claim a precision the data doesn't
+  // have. A floor plan's footprint is the opposite kind of object: exact
+  // geometry you line up against a roof edge, so a soft edge is not
+  // humility, it's just blur in the way of the one job the outline has.
+  exactOutline?: boolean;
   // Solo mode's "cone" shapes (see soloShapes in coverageConfig.ts) reuse
   // the gradient machinery but need two things the accumulate-mode hull
   // gradient doesn't: the gradient's far color isn't always the same fixed
@@ -272,6 +291,15 @@ interface RadioMapProps {
   // map grows a "Focus area" control for placing and resizing it.
   area?: FocusArea | null;
   onAreaChange?: (area: FocusArea | null) => void;
+  // Plain click-to-pick, independent of the focus-area "placing" mode above.
+  // Used for dropping ground-truth pins (see LocalizationPage) — kept as its
+  // own prop rather than reusing the focus-area flow, which is one-shot and
+  // owns its own arming state.
+  onMapClick?: ((lat: number, lng: number) => void) | null;
+  // Where to open when there's nothing to fit bounds to — e.g. the browser's
+  // geolocation. Only used for the initial view; it never yanks the map away
+  // from wherever the user has since panned to.
+  initialCenter?: [number, number] | null;
 }
 
 export interface RadioMapHandle {
@@ -307,6 +335,8 @@ export function RadioMap({
   onReady,
   area = null,
   onAreaChange,
+  onMapClick = null,
+  initialCenter = null,
 }: RadioMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -318,6 +348,20 @@ export function RadioMap({
   // after that is left alone; the "Fit to data" button (below) re-triggers
   // it on demand.
   const hasFitOnceRef = useRef(false);
+
+  // Recentre when a late-arriving initialCenter (browser geolocation is
+  // asynchronous, so it lands after mount) shows up — but only while the map
+  // has nothing of its own to show, so it can never yank the view away from
+  // data the user is looking at, or from wherever they've panned to.
+  const hasRecentredRef = useRef(false);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !initialCenter || hasRecentredRef.current) return;
+    if (points.length > 0 || polygons.length > 0 || hasFitOnceRef.current) return;
+    hasRecentredRef.current = true;
+    map.setView(initialCenter, 17);
+  }, [initialCenter, points.length, polygons.length]);
+
   const lastBoundsRef = useRef<[number, number][] | null>(null);
   // Coverage shapes only, tracked separately from lastBoundsRef for printing
   // — see prepareForPrint for why the report frames on these rather than on
@@ -330,16 +374,31 @@ export function RadioMap({
   const [placing, setPlacing] = useState(false);
   const onAreaChangeRef = useRef(onAreaChange);
   onAreaChangeRef.current = onAreaChange;
+  // Same reason as onAreaChangeRef: the click handler is registered once for
+  // the map's lifetime, so a captured callback would go stale immediately.
+  const onMapClickRef = useRef(onMapClick);
+  onMapClickRef.current = onMapClick;
+  const initialCenterRef = useRef(initialCenter);
+  initialCenterRef.current = initialCenter;
   const areaRef = useRef(area);
   areaRef.current = area;
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
-    const map = L.map(containerRef.current).setView(DEFAULT_CENTER, 15);
+    const map = L.map(containerRef.current).setView(initialCenterRef.current ?? DEFAULT_CENTER, 17);
     tileLayerRef.current = L.tileLayer(TILE_URL, {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      maxZoom: 19,
+      // OSM has no tiles past z19, but z19 is not close enough to line a
+      // floor plan up against a roof — a house is a couple of centimetres
+      // across at that zoom, and anchoring it means clicking a specific
+      // corner of a specific building. maxNativeZoom stops Leaflet asking
+      // for tiles that don't exist; maxZoom lets it keep zooming by scaling
+      // the z19 tile up. The basemap goes soft, which is the right trade:
+      // the precision that matters here is where you click, not how sharp
+      // the label under it is.
+      maxNativeZoom: 19,
+      maxZoom: 22,
     }).addTo(map);
     // Forces the SVG renderer (and its <svg> element) to exist from the
     // start, regardless of whether any vector layer has been added yet —
@@ -358,6 +417,12 @@ export function RadioMap({
     // than a captured value. Placing is one-shot: click, circle appears,
     // arming turns itself off.
     map.on("click", (event: L.LeafletMouseEvent) => {
+      // Ground-truth pin placement takes precedence while armed; the
+      // focus-area flow below is unchanged when it isn't.
+      if (onMapClickRef.current) {
+        onMapClickRef.current(Number(event.latlng.lat.toFixed(6)), Number(event.latlng.lng.toFixed(6)));
+        return;
+      }
       if (!placingRef.current) return;
       placingRef.current = false;
       setPlacing(false);
@@ -412,8 +477,16 @@ export function RadioMap({
         polygon.points.map((p) => [p.lat, p.lng] as [number, number]),
         // Blurred via CSS (see .coverage-soft in index.css) on top of the
         // already-smoothed outline — radio coverage fades out, so a crisp
-        // edge would overstate how precisely the boundary is known.
-        { color: polygon.color, weight: 2, opacity: 0.7, fillColor, fillOpacity, className: "coverage-soft" },
+        // edge would overstate how precisely the boundary is known. Shapes
+        // that are exact geometry rather than an estimate opt out.
+        {
+          color: polygon.color,
+          weight: polygon.exactOutline ? 3 : 2,
+          opacity: polygon.exactOutline ? 1 : 0.7,
+          fillColor,
+          fillOpacity,
+          className: polygon.exactOutline ? "" : "coverage-soft",
+        },
       );
       if (polygon.label) layer.bindTooltip(polygon.label);
       if (polygon.detailPath) {
@@ -570,7 +643,7 @@ export function RadioMap({
     if (!hasFitOnceRef.current && allLatLngs.length > 0) {
       hasFitOnceRef.current = true;
       map.invalidateSize();
-      map.fitBounds(allLatLngs, { maxZoom: 17 });
+      map.fitBounds(allLatLngs, { maxZoom: FIT_MAX_ZOOM });
     }
   }, [points, mode, polygons, onDeleteScanSession]);
 
@@ -578,7 +651,7 @@ export function RadioMap({
     const map = mapRef.current;
     if (!map || !lastBoundsRef.current) return;
     map.invalidateSize();
-    map.fitBounds(lastBoundsRef.current, { maxZoom: 17 });
+    map.fitBounds(lastBoundsRef.current, { maxZoom: FIT_MAX_ZOOM });
   }
 
   /**
@@ -691,7 +764,7 @@ export function RadioMap({
       // cut off" is the whole point of the report map.
       // animate:false so the view is final when this returns — an in-flight
       // pan would otherwise still be moving while the tiles are counted.
-      map.fitBounds(bounds, { padding: [24, 24], maxZoom: 17, animate: false });
+      map.fitBounds(bounds, { padding: [24, 24], maxZoom: FIT_MAX_ZOOM, animate: false });
     }
     await waitForTiles();
   }, [area, waitForTiles]);

@@ -11,9 +11,11 @@ import { ChannelCongestionPage } from "./pages/ChannelCongestionPage";
 import { CrashReportsPage } from "./pages/CrashReportsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DownloadPage } from "./pages/DownloadPage";
+import { FloorPlanPage } from "./pages/FloorPlanPage";
 import { HeatmapPage } from "./pages/HeatmapPage";
 import { LANDeviceDetailPage } from "./pages/LANDeviceDetailPage";
 import { LANDevicesPage } from "./pages/LANDevicesPage";
+import { LocalizationPage } from "./pages/LocalizationPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ManageScansPage } from "./pages/ManageScansPage";
 import { NetworkDetailPage } from "./pages/NetworkDetailPage";
@@ -56,6 +58,8 @@ export function App() {
           <Route path="/ble-devices/:identifier" element={<BLEDeviceDetailPage />} />
           <Route path="/satellites" element={<SatelliteViewPage />} />
           <Route path="/heatmap" element={<HeatmapPage />} />
+          <Route path="/localization" element={<LocalizationPage />} />
+          <Route path="/floor-plans" element={<FloorPlanPage />} />
           <Route path="/lan-devices" element={<LANDevicesPage />} />
           <Route path="/lan-devices/:ip" element={<LANDeviceDetailPage />} />
           <Route path="/download" element={<DownloadPage />} />

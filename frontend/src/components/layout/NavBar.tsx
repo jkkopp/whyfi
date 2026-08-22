@@ -9,6 +9,8 @@ const LINKS = [
   { to: "/ble-devices", label: "BLE Devices", icon: "ble" as const },
   { to: "/satellites", label: "Location", icon: "location" as const },
   { to: "/heatmap", label: "Heatmap", icon: "heatmap" as const },
+  { to: "/localization", label: "Localization", icon: "localization" as const },
+  { to: "/floor-plans", label: "Floor Plans", icon: "floorplan" as const },
   { to: "/lan-devices", label: "LAN", icon: "lan" as const },
   { to: "/download", label: "Download", icon: "download" as const },
   { to: "/remote", label: "Remote", icon: "remote" as const },

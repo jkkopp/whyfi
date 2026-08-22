@@ -7,9 +7,13 @@ from .models import (
     BLEDevice,
     BLEObservation,
     Band,
+    CalibratedRangeModel,
     CellObservation,
     CellTower,
+    FloorPlan,
+    FtmRangingObservation,
     GeocodedLocation,
+    GroundTruthPosition,
     LANDevice,
     LANObservation,
     SatelliteObservation,
@@ -434,6 +438,18 @@ class WiFiObservationInputSerializer(serializers.Serializer):
     observed_at = serializers.DateTimeField(required=False)
 
 
+class FTMRangingObservationInputSerializer(serializers.Serializer):
+    bssid = serializers.CharField(max_length=17)
+    success = serializers.BooleanField(default=False)
+    distance_mm = serializers.IntegerField(required=False, allow_null=True)
+    distance_std_dev_mm = serializers.IntegerField(required=False, allow_null=True)
+    rssi = serializers.IntegerField(required=False, allow_null=True)
+    num_attempted_measurements = serializers.IntegerField(required=False, allow_null=True)
+    num_successful_measurements = serializers.IntegerField(required=False, allow_null=True)
+    status = serializers.CharField(max_length=32, allow_blank=True, default="")
+    observed_at = serializers.DateTimeField(required=False)
+
+
 class CellObservationInputSerializer(serializers.Serializer):
     mcc = serializers.CharField(max_length=3, allow_blank=True, default="")
     mnc = serializers.CharField(max_length=3, allow_blank=True, default="")
@@ -509,6 +525,7 @@ class ScanSessionIngestSerializer(serializers.Serializer):
     fused_longitude = serializers.FloatField(required=False, allow_null=True)
     fused_accuracy_meters = serializers.FloatField(required=False, allow_null=True)
     wifi_observations = WiFiObservationInputSerializer(many=True, required=False, default=list)
+    ftm_observations = FTMRangingObservationInputSerializer(many=True, required=False, default=list)
     cell_observations = CellObservationInputSerializer(many=True, required=False, default=list)
     ble_observations = BLEObservationInputSerializer(many=True, required=False, default=list)
     satellite_observations = SatelliteObservationInputSerializer(many=True, required=False, default=list)
@@ -594,6 +611,24 @@ class ScanSessionIngestSerializer(serializers.Serializer):
                 is_80211mc_responder=item.get("is_80211mc_responder", False),
                 operator_friendly_name=item.get("operator_friendly_name", ""),
                 venue_name=item.get("venue_name", ""),
+                observed_at=item.get("observed_at", default_observed_at),
+            )
+
+        for item in validated_data.get("ftm_observations", []):
+            # No SSID known here — ranging targets a bare BSSID, not a scan
+            # result — so this can only get-or-create by bssid, never seed
+            # or update ssid (that stays whatever the WiFi scan loop set).
+            access_point, _ = AccessPoint.objects.get_or_create(bssid=item["bssid"])
+            FtmRangingObservation.objects.create(
+                scan_session=session,
+                access_point=access_point,
+                success=item.get("success", False),
+                distance_mm=item.get("distance_mm"),
+                distance_std_dev_mm=item.get("distance_std_dev_mm"),
+                rssi=item.get("rssi"),
+                num_attempted_measurements=item.get("num_attempted_measurements"),
+                num_successful_measurements=item.get("num_successful_measurements"),
+                status=item.get("status", ""),
                 observed_at=item.get("observed_at", default_observed_at),
             )
 
@@ -728,3 +763,52 @@ class ScanSessionIngestSerializer(serializers.Serializer):
             )
 
         return session
+
+
+class GroundTruthPositionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GroundTruthPosition
+        fields = [
+            "id", "kind", "target_key", "latitude", "longitude",
+            "label", "note", "floor_plan", "image_x", "image_y",
+            "created_at", "updated_at",
+        ]
+        # latitude/longitude are writable directly (map clicks) but are
+        # *derived* when floor_plan + image_x/y are supplied instead — see
+        # GroundTruthViewSet.create.
+        read_only_fields = ["id", "created_at", "updated_at"]
+        extra_kwargs = {"latitude": {"required": False}, "longitude": {"required": False}}
+
+
+class FloorPlanSerializer(serializers.ModelSerializer):
+    is_calibrated = serializers.BooleanField(read_only=True)
+    placement_count = serializers.SerializerMethodField()
+    # The plan's footprint in real coordinates, so the map can draw it and the
+    # operator can see whether the calibration actually lines up with the
+    # building rather than having to read a bearing in degrees.
+    corners = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FloorPlan
+        fields = [
+            "id", "name", "image", "image_width_px", "image_height_px",
+            "anchor1_image_x", "anchor1_image_y", "anchor1_lat", "anchor1_lng",
+            "anchor2_image_x", "anchor2_image_y", "anchor2_lat", "anchor2_lng",
+            "meters_per_pixel", "bearing_deg", "outline_points",
+            "is_calibrated", "placement_count", "corners", "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def get_placement_count(self, obj):
+        return obj.placements.count()
+
+    def get_corners(self, obj):
+        from .floorplan import plan_corners
+
+        return plan_corners(obj)
+
+
+class CalibratedRangeModelSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CalibratedRangeModel
+        fields = "__all__"

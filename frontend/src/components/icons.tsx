@@ -10,6 +10,8 @@ type IconName =
   | "ble"
   | "location"
   | "heatmap"
+  | "localization"
+  | "floorplan"
   | "lan"
   | "download"
   | "scans"
@@ -82,6 +84,28 @@ export function NavIcon({ name }: { name: IconName }) {
           <polygon points="2.5,5 7.5,3.2 12.5,5 17.5,3.2 17.5,15 12.5,16.8 7.5,15 2.5,16.8" />
           <line x1="7.5" y1="3.2" x2="7.5" y2="15" />
           <line x1="12.5" y1="5" x2="12.5" y2="16.8" />
+        </svg>
+      );
+    case "localization":
+      // Crosshair over concentric rings — trilateration onto a point.
+      return (
+        <svg {...commonProps}>
+          <circle cx="10" cy="10" r="6.5" />
+          <circle cx="10" cy="10" r="2.2" />
+          <line x1="10" y1="1.5" x2="10" y2="4" />
+          <line x1="10" y1="16" x2="10" y2="18.5" />
+          <line x1="1.5" y1="10" x2="4" y2="10" />
+          <line x1="16" y1="10" x2="18.5" y2="10" />
+        </svg>
+      );
+    case "floorplan":
+      // A simple room plan: outer wall with an interior partition.
+      return (
+        <svg {...commonProps}>
+          <rect x="2.5" y="3.5" width="15" height="13" rx="1" />
+          <line x1="9" y1="3.5" x2="9" y2="10" />
+          <line x1="9" y1="10" x2="17.5" y2="10" />
+          <line x1="2.5" y1="12.5" x2="9" y2="12.5" />
         </svg>
       );
     case "lan":

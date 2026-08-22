@@ -13,6 +13,7 @@ import { SimpleLineChart } from "../components/SimpleLineChart";
 import { ALWAYS_MOBILE_BLE_TYPES, COVERAGE_STROKE_COLOR, classifyDeviceCoverage, soloShapes } from "../coverageConfig";
 import { useFilter } from "../context/FilterContext";
 import { resolveCurrentScan } from "../currentScan";
+import { getEstimatorPreference } from "../estimatorPreference";
 import { useDeleteScanSession } from "../hooks/useDeleteScanSession";
 import {
   describeObservedSpan,
@@ -22,7 +23,7 @@ import {
 } from "../hooks/useDeviceReport";
 import { usePolling } from "../hooks/usePolling";
 import { formatCoords } from "../reportLinks";
-import { bearingToCompass, formatDistance, haversineDistanceMeters, initialBearingDegrees, weightedCentroid } from "../geo";
+import { bearingToCompass, formatDistance, haversineDistanceMeters, initialBearingDegrees } from "../geo";
 import { signalStrengthColor, signalStrengthLabel } from "../signalColor";
 
 export function BLEDeviceDetailPage() {
@@ -41,6 +42,16 @@ export function BLEDeviceDetailPage() {
   const { printing, onMapReady, printButtonProps } = useReportPrinting();
 
   const device = usePolling(() => api.bleDevice(identifier), 20000, [identifier], { paused: printing });
+  // The estimated position comes from the backend rather than being computed
+  // here, so every surface agrees on what the marker means and only one
+  // implementation of each algorithm exists (backend/scans/estimators.py).
+  const estimator = getEstimatorPreference();
+  const position = usePolling(
+    () => api.bleDevicePosition(identifier, { since, until, sessionLimit, estimator }),
+    20000,
+    [identifier, since, until, sessionLimit, estimator],
+    { paused: printing },
+  );
   const observations = usePolling(
     () => api.bleObservationsForDevice(identifier, { since, until, sessionLimit }),
     20000,
@@ -126,15 +137,17 @@ export function BLEDeviceDetailPage() {
   }));
   const heatPoints = heatShape?.kind === "points" ? rawPoints : [];
 
-  // The device's estimated position from its *entire* sighting history —
-  // see NetworkDetailPage.tsx for why full history rather than just the
-  // slider-visible readings. Skipped for forced-mobile devices (worn
-  // headphones/wearables): there's no fixed "where it stands" to average
-  // toward, so a weighted centroid of scattered sightings would just be a
-  // meaningless point along wherever the person happened to walk.
+  // Server-computed under the user's chosen estimator (see
+  // estimatorPreference.ts), over the whole filtered window rather than only
+  // the slider-visible readings — so Solo mode's cone apex doesn't jump as
+  // you scrub the slider.
+  //
+  // Skipped for forced-mobile devices (worn headphones/wearables): there's no
+  // fixed "where it stands" to estimate, so any of these algorithms would
+  // just return a meaningless point along wherever the person walked.
   const apEstimatedLocation =
-    !isForcedMobile && geotagged.length > 0
-      ? weightedCentroid(geotagged.map((s) => ({ lat: s.latitude as number, lng: s.longitude as number, weight: s.rssi })))
+    !isForcedMobile && position.data?.lat != null && position.data?.lng != null
+      ? { lat: position.data.lat, lng: position.data.lng }
       : null;
 
   // Solo mode: a cone from the device's known position to this one

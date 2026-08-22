@@ -9,12 +9,17 @@ from scans.views import (
     BLEObservationViewSet,
     CellObservationViewSet,
     CellTowerViewSet,
+    FloorPlanViewSet,
+    GroundTruthViewSet,
     LANDeviceViewSet,
     LANObservationViewSet,
     ScanSessionViewSet,
     SatelliteObservationViewSet,
+    calibration,
+    calibration_activate,
     channel_congestion,
     health,
+    localization_benchmark,
     heatmap,
     mission_ble_observations,
     mission_cell_observations,
@@ -34,6 +39,8 @@ router.register("ble-devices", BLEDeviceViewSet, basename="ble-device")
 router.register("satellite-observations", SatelliteObservationViewSet, basename="satellite-observation")
 router.register("lan-observations", LANObservationViewSet, basename="lan-observation")
 router.register("lan-devices", LANDeviceViewSet, basename="lan-device")
+router.register("ground-truth", GroundTruthViewSet, basename="ground-truth")
+router.register("floor-plans", FloorPlanViewSet, basename="floor-plan")
 
 urlpatterns = [
     path("health/", health),
@@ -42,6 +49,9 @@ urlpatterns = [
     path("auth/session/", session_view),
     path("channel-congestion/", channel_congestion),
     path("heatmap/", heatmap),
+    path("localization/benchmark/", localization_benchmark),
+    path("calibration/", calibration),
+    path("calibration/activate/", calibration_activate),
     path("mission/wifi-observations/", mission_wifi_observations),
     path("mission/ble-observations/", mission_ble_observations),
     path("mission/cell-observations/", mission_cell_observations),
