@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { api, areaQuery } from "../api/client";
+import { GitHubIcon } from "../components/icons";
 import { SortableTh } from "../components/SortableTh";
 import { TableControls } from "../components/TableControls";
 import { useFilter } from "../context/FilterContext";
@@ -129,6 +130,19 @@ export function DashboardPage() {
       <p className="page-hint">
         Everything your sensors have picked up recently — WiFi, BLE, cellular, and LAN — one row per device/network,
         most recently seen first. Click through to a detail page for the full picture.
+      </p>
+      <p className="page-hint">
+        whyfi is open source and free —{" "}
+        <a
+          href="https://github.com/inv1sible/whyfi"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="View the code on GitHub"
+          aria-label="Check on GitHub"
+          style={{ display: "inline-flex", alignItems: "center", gap: "4px", verticalAlign: "text-bottom" }}
+        >
+          Check on <GitHubIcon />
+        </a>
       </p>
 
       {loading && !anyData && <p>Loading…</p>}
