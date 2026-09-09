@@ -100,6 +100,13 @@ implementation.
 
 ## v-next (deferred, not forgotten)
 
+- **Export WiFi observations to Kismet.** Kismet has a REST endpoint built
+  for exactly this (`scan_report.cmd`, "Wi-Fi scanning mode") — no packet
+  capture or custom datasource plugin needed, and its fields map almost
+  directly onto whyfi's existing WiFi observation schema. Researched but not
+  built; open question is whether the forwarder lives in the backend (one
+  config, every sensor) or the app (per-device config). See
+  `docs/kismet-export-outlook.md`.
 - Matter/smart-home device discovery (BLE commissioning adverts + mDNS
   service records) — schema left open, not designed yet.
 - Watch a *specific* WiFi/BLE/LAN device and alert when it comes online or
